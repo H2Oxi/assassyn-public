@@ -66,6 +66,7 @@ CG_OPCODE = {
     expr.intrinsic.Intrinsic.WAIT_UNTIL: 'wait_until',
     expr.intrinsic.Intrinsic.FINISH: 'finish',
     expr.intrinsic.Intrinsic.ASSERT: 'assert',
+    expr.intrinsic.Intrinsic.BARRIER: 'barrier',
 }
 
 CG_MIDFIX = {
@@ -393,6 +394,10 @@ class CodeGen(visitor.Visitor):
                 res = f'sys.{ib_method}({cond});'
             elif node.opcode == expr.Intrinsic.FINISH:
                 res = f'sys.{ib_method}();'
+            elif node.opcode == expr.Intrinsic.BARRIER:
+                barrier_node = self.generate_rval(node.args[0])
+                res = f'sys.{ib_method}({barrier_node});'
+
             else:
                 length = len(repr(node)) - 1
                 res = f'  // ^{"~" * length}: Support the instruction above'

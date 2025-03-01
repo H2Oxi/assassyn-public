@@ -15,6 +15,8 @@ use crate::{
   use crate::ir::node::IsElement;
   use std::collections::HashMap;
   use crate::ir::Expr;
+  use crate::builder::PortInfo;
+  use crate::ir::DataType;
 
   pub struct GatherModulesToCut<'sys> {
     sys: &'sys SysBuilder,
@@ -51,7 +53,7 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
         println!("Expr: {:?}", expr.get_key());
         match expr.get_opcode() {
             Opcode::BlockIntrinsic { intrinsic } => {
-                if intrinsic == subcode::BlockIntrinsic::Buffer {
+                if intrinsic == subcode::BlockIntrinsic::Barrier {
                     let mut visitor = GraphVisitor::new();
                     if let Some(module) = self.to_rewrite.take() {
                         visitor.visit_module(module);
@@ -78,10 +80,16 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
 }
 
   #[derive(Debug, Clone)]
+  pub struct NodeData {
+    mom: usize,
+    child: usize,
+  }
 
   pub struct DependencyGraph {
-    adjacency: HashMap<usize, usize>,  //  HashMap<mom, childs>
+    adjacency: Vec<NodeData>,  //  HashMap<mom, childs>
     expr_hashmap: HashMap<usize, BaseNode>,  // HashMap<key, EXPR>
+    buffered_nodes: Vec<usize>, 
+
     buffered_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
     moved_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
 
@@ -96,49 +104,85 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
   impl DependencyGraph {
     pub fn new() -> Self {
       Self {
-        adjacency: HashMap::new(),
+        adjacency: Vec::new(),
         expr_hashmap: HashMap::new(),
         buffered_expr: HashMap::new(),
         moved_expr: HashMap::new(),
+        buffered_nodes: Vec::new(),
       }
     }
   
     pub fn add_edge(&mut self, mom: usize, child: usize) {
-        self.adjacency.insert(mom, child);
+        self.adjacency.push(NodeData{mom:mom, child:child});
         //self.expr_hashmap.entry(child);
     }
+
+    pub fn rewrite_modules(&mut self, sys: &mut SysBuilder) {
+        let mut all_ports = vec![];
+        for (key, expr) in self.moved_expr.iter() 
+        {
+            println!("Moved expr: {:?}, {:?},{:?} ", key, expr,expr.as_ref::<Expr>(sys).unwrap().get_opcode());
+    
+        }
+        for (key, expr) in self.buffered_expr.iter() 
+        {
+            println!("Buffered expr: {:?}, {:?},  {:?}", key, expr,expr.as_ref::<Expr>(sys).unwrap().get_opcode());
+    
+        }
+        for key in self.buffered_nodes.iter() {
+            let name = format!("buffered_{}", key);
+            //#TODO support change the data type
+            all_ports.push(PortInfo::new(&name, DataType::int_ty(32)));
+            println!("Buffered node: {:?}", key);
+
+        }
+        //#TODO create a new module and insert the moved exprs into it
+        //#TODO change the logic to support multiple cutting points
+
+        let barrier_m_0 = sys.create_module(
+            "barrier_module",  //#TODO change the name to a right one
+            all_ports,
+        );
+
+        
+    }
   
-    pub fn rewrite(&self, sys: &SysBuilder, buffer_node: usize) {
+    pub fn rewrite(&mut self, sys: &mut SysBuilder, buffer_node: usize) {
       let mut all_paths = vec![];
+      self.buffered_nodes.push(buffer_node);
+
       #[allow(clippy::too_many_arguments)]
       fn dfs(
-        graph: &HashMap<usize, usize>,
+        graph: &Vec<NodeData>,
         current: usize,
         path: &mut Vec<usize>,
         all_paths: &mut Vec<Vec<usize>>,
 
       ) {
         path.push(current);
+        
   
         let mut has_neighbors = false;
-        for (mom, child) in graph {
-          
-        if *mom == current {
-          has_neighbors = true;
-          dfs(
-            graph,
-            *child,
-            path,
-            all_paths,
-          );
-          
-        }
+        for edge in graph
+        {
+            
+            if edge.mom == current {
+              has_neighbors = true;
+              dfs(
+                graph,
+                edge.child,
+                path,
+                all_paths,
+              );
+            }
+            
         }
         if !has_neighbors && path.len() > 1  {
             all_paths.push(path.clone());
         }
   
         path.pop();
+
       }
   
         let mut path: Vec<usize> = Vec::new();
@@ -157,9 +201,12 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
         println!("Key: {}", key);
     }
 
+
+    // we should create a new module and insert the moved exprs into it
+
     for path in all_paths {
         let mut output_string = String::new();
-
+        
         for (i, key) in path.iter().enumerate() {
             if i > 0 {
                 output_string.push_str(" -> ");
@@ -167,13 +214,31 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                 output_string.push_str(&format!("{}: {:?}", key, base_node));
                 if let Ok(expr) = base_node.as_ref::<Expr>(sys) {
                     println!("Processing expression operands for Expr: {}", expr.get_name());
-            
-                    // 遍历所有操作数
-                    for operand in expr.operand_iter() {
-                        println!("Operand key: {}", operand.get_value().get_key());
-                        // 你也可以对 operand 进行其他操作，比如：
-                        // let operand_value = operand.get_value();
-                        // println!("Operand value: {:?}", operand_value);
+                    
+                     
+                    let not_save_nodes = expr.get_opcode() == Opcode::FIFOPush || expr.get_opcode() == Opcode::Bind || expr.get_opcode() == Opcode::AsyncCall;
+                    if !not_save_nodes
+                    {
+                        self.buffered_expr.insert(*key, expr.elem.clone());
+                        for operand in expr.operand_iter() {
+                            println!("Operand key: {}", operand.get_value().get_key());
+
+
+                            // if not in the expr_hashmap.key, then it should be a buffered node
+
+                            if !path.contains(&operand.get_value().get_key()) {
+                                println!("Buffered node: {:?}", operand.get_value().get_key());
+                                // if not in the buffered_nodes, then it should be a buffered node
+                                if !self.buffered_nodes.contains(&operand.get_value().get_key()) {
+                                    self.buffered_nodes.push(operand.get_value().get_key());
+                                }
+                            
+                            }
+
+                        }
+                    }
+                    else {
+                        self.moved_expr.insert(*key, expr.elem.clone());
                     }
             
                     if let Some(first_operand) = expr.get_operand(0) {
@@ -196,6 +261,10 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
 
         println!("Path:  {}", path_with_edges.join("    "));
     }
+    
+    self.rewrite_modules(sys);
+
+
     }
   }
   
@@ -213,12 +282,18 @@ impl GraphVisitor {
 
 impl Visitor<()> for GraphVisitor {
     fn visit_expr(&mut self, expr: ExprRef<'_>) -> Option<()> {
-        for operand_ref in expr.operand_iter() {
-            self.graph
-                .add_edge(operand_ref.get_value().get_key(), expr.get_key());
-            self.graph.expr_hashmap.insert(expr.get_key(), expr.elem);
-            print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
-        }
+
+        //if expr.get_opcode() != Opcode::Log
+        //{
+            for operand_ref in expr.operand_iter() {
+                self.graph
+                    .add_edge(operand_ref.get_value().get_key(), expr.get_key());
+                self.graph.expr_hashmap.insert(expr.get_key(), expr.elem);
+                print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
+
+            }
+            
+        //}
         None
     }
 }
