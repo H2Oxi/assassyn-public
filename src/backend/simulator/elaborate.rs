@@ -17,7 +17,7 @@ use crate::{
   backend::common::{create_and_clean_dir, upstreams, Config},
   builder::system::{ModuleKind, SysBuilder},
   ir::{expr::subcode, instructions::PureIntrinsic, node::*, visitor::Visitor, *},
-  xform::rewrite_pipeline_buffer::GatherModulesToCut,
+  xform::barrier_analysis::GatherModulesToCut,
 };
 
 use super::utils::{dtype_to_rust_type, namify};
@@ -887,8 +887,7 @@ fn elaborate_impl(sys: &SysBuilder, config: &Config) -> Result<PathBuf, std::io:
 
 pub fn elaborate(sys: &SysBuilder, config: &Config) -> Result<PathBuf, std::io::Error> {
 
-  let mut visitor_piplinecut = GatherModulesToCut::new(sys);
-  visitor_piplinecut.enter(sys);
+
   let manifest = elaborate_impl(sys, config)?;
   let output = Command::new("cargo")
     .arg("fmt")

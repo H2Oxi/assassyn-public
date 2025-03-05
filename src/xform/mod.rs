@@ -6,6 +6,7 @@ pub mod cse;
 pub mod erase_metadata;
 pub mod rewrite_wait_until;
 pub mod rewrite_pipeline_buffer;
+pub mod barrier_analysis;
 
 pub struct Config {
   pub rewrite_wait_until: bool,

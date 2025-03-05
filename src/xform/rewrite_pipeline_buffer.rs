@@ -18,6 +18,9 @@ use crate::{
   use crate::builder::PortInfo;
   use crate::ir::DataType;
 
+
+
+
   pub struct GatherModulesToCut<'sys> {
     sys: &'sys SysBuilder,
     to_rewrite: Option<ModuleRef<'sys>>,
@@ -59,9 +62,10 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                         visitor.visit_module(module);
                     }
                     println!("Buffered expr: {:?}", expr.get_operand_value(0).as_ref().unwrap().get_key());
+                    
                     visitor
                         .graph
-                        .rewrite(self.sys,expr.get_operand_value(0).as_ref().unwrap().get_key());
+                        .gather_rewrite(self.sys,expr.get_operand_value(0).as_ref().unwrap().get_key());
                 }
             }
             _ => {}
@@ -117,7 +121,7 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
         //self.expr_hashmap.entry(child);
     }
 
-    pub fn rewrite_modules(&mut self, sys: &mut SysBuilder) {
+    pub fn rewrite_modules(&mut self, sys: &SysBuilder) {
         let mut all_ports = vec![];
         for (key, expr) in self.moved_expr.iter() 
         {
@@ -139,15 +143,15 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
         //#TODO create a new module and insert the moved exprs into it
         //#TODO change the logic to support multiple cutting points
 
-        let barrier_m_0 = sys.create_module(
-            "barrier_module",  //#TODO change the name to a right one
-            all_ports,
-        );
+        //let barrier_m_0 = sys.create_module(
+        //    "barrier_module",  //#TODO change the name to a right one
+        //    all_ports,
+        //);
 
         
     }
   
-    pub fn rewrite(&mut self, sys: &mut SysBuilder, buffer_node: usize) {
+    pub fn gather_rewrite(&mut self, sys: &SysBuilder, buffer_node: usize) {
       let mut all_paths = vec![];
       self.buffered_nodes.push(buffer_node);
 
@@ -260,10 +264,10 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
             .collect();
 
         println!("Path:  {}", path_with_edges.join("    "));
+
+        self.rewrite_modules(sys);
     }
     
-    self.rewrite_modules(sys);
-
 
     }
   }
