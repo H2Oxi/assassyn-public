@@ -15,7 +15,9 @@ use crate::{
   use crate::ir::Expr;
   use crate::builder::PortInfo;
   use crate::ir::DataType;
- 
+  use crate::ir::node::NodeKind;
+  use crate::ir::Module;
+  use crate::ir::expr::subcode::Binary;
 
   #[derive(Debug, Clone)]
   pub struct SubModule {
@@ -33,8 +35,6 @@ use crate::{
   }
 
   
-  
-
   pub struct GatherModulesToCut<'sys> {
     sys: &'sys SysBuilder,
     to_rewrite: Option<ModuleRef<'sys>>,
@@ -195,104 +195,118 @@ impl DependencyGraph {
       submodule_order: &mut HashMap<usize, usize>,
       expr_hashmap: &HashMap<usize, BaseNode>,
       module_outputs: &Vec<usize>,
+      used_nodes: &mut Vec<usize>,
 
     ) {
       path.push(current);
       println!("current_level: {:?}", *current_level);
       println!("current_node: {:?}", current);
-      
 
-      let mut has_neighbors = false;
-      for edge in graph
-      {
+      let new_level;
+      let current_clone = current.clone();
+
+      let key_containing_v = submodule_barrier_map.iter()
+        .find_map(|(&key, vec)| if vec.contains(&current_clone) { Some(key) } else { None });
+
+      match key_containing_v {
+          Some(submodule_key) => {
+              //make sure the barrier node is not ordered
           
-          if edge.mom == current {
-            has_neighbors = true;
-            //find the next node.and we got the current expression,then we should justify the current expression is a buffered node or not
-            //if it is in one of the submodule_barrier_map, then we should update or create a new submodule in next order
-            //if it is not in the submodule_barrier_map, then we can just continue to find the next node
-            //just update the current submodule
-            println!("submodule_map_key: {:?}", submodule_order.get(&(*current_level as usize)).unwrap());
-            println!("submodule_map_get_mut: {:?}", submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap());
-            println!("expr_hashmap: {:?}", expr_hashmap.get(&current).unwrap());
-
+              //target to the next level
+              
+              if  submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_barriers.is_empty() {
+                  new_level = *current_level + 1;
+                  submodule_order.insert(new_level as usize, submodule_key);
+                  //save barrier nodes for current submodule
+                  submodule_map
+                      .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
+                      .unwrap()
+                      .buffered_barriers = submodule_barrier_map.get(&submodule_key).unwrap().clone();
+                  //save ports for new submodule
+                  submodule_map.insert(submodule_key, SubModule{buffered_barriers: Vec::new(), 
+                      buffered_ports: submodule_barrier_map.get(&submodule_key).unwrap().clone(), buffered_expr: HashMap::new()});
+              }
+              else{
+                  if submodule_map.get(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_ports.contains(&current_clone) {
+                      if * current_level == 0 {
+                          new_level = *current_level;
+                      }
+                      else {
+                          new_level = *current_level - 1;
+                      }
+                  }
+                  else { 
+                      if submodule_map.get(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_barriers.contains(&current_clone)
+                      {
+                          new_level = *current_level + 1;
+                      }
+                      else {
+                          new_level = *current_level;
+                      }     
+                  }
+              }
+              
+              
+          
+          },
+          None => {
+            new_level = *current_level;
+          },
+      }
+      println!("current: {:?}  , current_clone: {:?}", current, current_clone);
+      println!("submodule_map_key: {:?}", submodule_order.get(&(*current_level as usize)).unwrap());
+      println!("submodule_map_get_mut: {:?}", submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap());
+      println!("------current: {:?}", current);
+      println!("expr_hashmap: {:?}", expr_hashmap.get(&current).unwrap());
+                  
+                  
+      let mut has_child = false;
+      if !used_nodes.contains(&current) {
             submodule_map
-                .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
-                .unwrap()
-                .buffered_expr
-                .insert(current, expr_hashmap.get(&current).unwrap().clone());
+              .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
+              .unwrap()
+              .buffered_expr
+              .insert(current, expr_hashmap.get(&current).unwrap().clone());
+            for edge in graph
+            {
 
+                if edge.mom == current {
+                    has_child = true;
+                  //find the next node.and we got the current expression,then we should justify the current expression is a buffered node or not
+                  //if it is in one of the submodule_barrier_map, then we should update or create a new submodule in next order
+                  //if it is not in the submodule_barrier_map, then we can just continue to find the next node
+                  //just update the current submodule
+                  
+                  
+              
+                  println!("goto_node: {:?}", edge.child);
+                  *current_level = new_level;
+              
+              
+                  dfs(
+                    graph,
+                    edge.child,
+                    path,
+                    all_paths,
+                    current_level,
+                    submodule_barrier_map,
+                    submodule_map,
+                    submodule_order,
+                    expr_hashmap,
+                    module_outputs,
+                    used_nodes,
+                  );
+                }
 
-            let key_containing_v = submodule_barrier_map.iter()
-                .find_map(|(&key, vec)| if vec.contains(&current) { Some(key) } else { None });
-    
-            match key_containing_v {
-                Some(submodule_key) => {
-                    //make sure the barrier node is not ordered
-
-                    //target to the next level
-                    let new_level;
-                    if  submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_barriers.is_empty() {
-                        new_level = *current_level + 1;
-                        submodule_order.insert(new_level as usize, submodule_key);
-                        //save barrier nodes for current submodule
-                        submodule_map
-                            .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
-                            .unwrap()
-                            .buffered_barriers = submodule_barrier_map.get(&submodule_key).unwrap().clone();
-                        //save ports for new submodule
-                        submodule_map.insert(submodule_key, SubModule{buffered_barriers: Vec::new(), 
-                            buffered_ports: submodule_barrier_map.get(&submodule_key).unwrap().clone(), buffered_expr: HashMap::new()});
-                    }
-                    else{
-                        if submodule_map.get(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_ports.contains(&current) {
-                            if * current_level == 0 {
-                                new_level = *current_level;
-                            }
-                            else {
-                                new_level = *current_level - 1;
-                            }
-                        }
-                        else { 
-                            if submodule_map.get(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_barriers.contains(&current)
-                            {
-                                new_level = *current_level + 1;
-                            }
-                            else {
-                                new_level = *current_level;
-                            }     
-                        }
-                    }
-                    *current_level = new_level;
-                    
-                
-                },
-                None => {
-
-                },
             }
-
-            println!("goto_node: {:?}", edge.child);
-
-
-            dfs(
-              graph,
-              edge.child,
-              path,
-              all_paths,
-              current_level,
-              submodule_barrier_map,
-              submodule_map,
-              submodule_order,
-              expr_hashmap,
-              module_outputs
-            );
-          }
-          
-      }
-      if !has_neighbors && path.len() > 1  {
-          all_paths.push(path.clone());
-      }
+            if !has_child {
+                all_paths.push(path.clone());
+                
+            }
+        }else {
+            all_paths.push(path.clone());
+        }
+      
       if module_outputs.contains(&current) {
         if  submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_barriers.is_empty() {
             submodule_map
@@ -301,19 +315,22 @@ impl DependencyGraph {
                 .buffered_barriers = module_outputs.clone();
         }
       }
+      used_nodes.push(current as usize);
+      println!("used_nodes: {:?}", used_nodes);
 
       path.pop();
 
     }
 
     let mut path: Vec<usize> = Vec::new();
-    let mut level = 0;
+    let mut used_nodes: Vec<usize> = Vec::new();
+    
     println!("=== Gathering Submodule Information ===");
 
     for module_port in self.module_ports.iter() 
     {   
         let mut all_paths = vec![];   
-        level = 0;
+        let mut level = 0;
 
         //create the first submodule_map
         if self.submodule_map.is_empty() {
@@ -334,7 +351,8 @@ impl DependencyGraph {
           &mut self.submodule_map,
           &mut self.submodule_order,
           &self.expr_hashmap,
-          &self.module_outputs
+          &self.module_outputs,
+          &mut used_nodes,
         );
     
 
@@ -505,6 +523,7 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
   fn visit_expr(&mut self, expr: ExprRef<'_>) -> Option<()> {
 
     let mut is_barrier = false;
+    let mut is_output = false;
 
     match expr.get_opcode() {
         Opcode::BlockIntrinsic { intrinsic } => {
@@ -514,10 +533,16 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
                 is_barrier = true;
             }
         }
+        Opcode::Bind => {
+            is_output = true;
+        }
+        Opcode::AsyncCall => {
+            is_output = true;
+        }
 
-        _ => {is_barrier = false;}
+        _ => {is_barrier = false; is_output = false;}
     }
-    if !is_barrier
+    if !(is_barrier || is_output)
     {
         self.graph.expr_hashmap.insert(expr.get_key(), expr.elem);
         println!("expr_hashmap_insert: {:?}", expr.get_key());
@@ -533,19 +558,21 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
         || expr.get_opcode() == Opcode::Store {
             //if let Some(DataType::UInt(_)) = operand_ref.get_value().get_dtype(self.sys) {} else
         {
-            self.graph.module_outputs.push(expr.get_key());
+            self.graph.module_outputs.push(expr.get_operand_value(1).as_ref().unwrap().get_key());
+            println!("-----module_outputs: {:?}", expr.get_operand_value(1).as_ref().unwrap().get_key());
         }
     
+        }else {
+            for operand_ref in expr.operand_iter() {
+                self.graph
+                    .add_edge(operand_ref.get_value().get_key(), expr.get_key());
+                
+                print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
+            }
+
         }
     
-        for operand_ref in expr.operand_iter() {
-            self.graph
-                .add_edge(operand_ref.get_value().get_key(), expr.get_key());
-            
-            print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
         
-        
-        }
     }
     None
   }
@@ -569,17 +596,30 @@ impl<'a> CutModules<'a> {
         self.submodule_container_map = submodule_container_map;
     }
 
+    pub fn is_submodule_valid(&self, key: usize) -> bool {
+        self.submodule_container_map.contains_key(&key)
+    }
+
     pub fn print_submodules(&mut self) {
         for (key, value) in self.submodule_container_map.iter() {
             println!("Submodule: {:?}, {:?}", key, value);
         }
     }
 
+    //#TODO add the check for the expr is valid for remapping
+    pub fn is_expr_valid(&self, node_map: &HashMap<usize, BaseNode> , expr: &ExprRef    ) -> bool {
+         true
+    }
+
     pub fn cut_modules(&mut self) {
         for (container_key, container) in self.submodule_container_map.iter() {
             // create the new modules inside each module
             let original_module_name = &container.module_name;
-            for (order, submod_key) in container.sub_module_order.iter() {
+            // we must make sure the order of the submodule is correct
+            let mut sub_module_order_rev: Vec<_> = container.sub_module_order.iter().collect();
+            sub_module_order_rev.sort_by_key(|(k, _)| *k);
+            
+            for (order, submod_key) in sub_module_order_rev {
                 let submodule = container
                 .sub_module_map
                 .get(submod_key)
@@ -597,26 +637,103 @@ impl<'a> CutModules<'a> {
             
             let new_module = self.sys.create_module(&new_module_name, new_module_ports);
             self.sys.set_current_module(new_module);
-
+            println!("new_module_name: {:?}", new_module_name);
+            //FIFO valid Gen
+            let mut last_fifo_valid_handle: Option<BaseNode> = None;
+            let mut ports_remapping_map = HashMap::new();
             
-            for (child_key, base_node) in submodule.buffered_expr.iter() {
+            for port_id in submodule.buffered_ports.iter() {
+                let actual_port_name = format!("buffered_{}", port_id);
+            
+                let port_handle = {
+                    let module_handle = new_module.as_ref::<Module>(&self.sys).unwrap();
+                    module_handle.get_fifo(&actual_port_name).unwrap().upcast()
+                };
+                ports_remapping_map.insert(*port_id, port_handle);
+                let fifo_valid_handle = self.sys.create_fifo_valid(port_handle);
+            
+                // If we already have a `last_fifo_valid_handle`, combine:
+                if let Some(prev_handle) = last_fifo_valid_handle {
+                    let fifo_valid_comb_handle = self.sys.create_bitwise_and(prev_handle, fifo_valid_handle);
+                    last_fifo_valid_handle = Some(fifo_valid_comb_handle);
+                    println!("Combining old handle = {:?} with new handle = {:?}", 
+                             prev_handle, fifo_valid_handle);
+                }else {
+                    last_fifo_valid_handle = Some(fifo_valid_handle);
 
-                let new_expr:ExprRef = base_node.clone().as_expr(self.sys).unwrap();
-                let opcode= new_expr.get_opcode();
+                }
                 
-                match opcode {
-                    Opcode::FIFOPush  => {
+            }
+            if let Some(fifo_all_valid) = last_fifo_valid_handle {
+                self.sys.create_wait_until(fifo_all_valid);
+            }
+            //FIFO pop Gen
+            //#TODO the barrier connection
+            let mut node_remapping_map = HashMap::new();
+            for (k,port) in ports_remapping_map.iter() {
+                let pop_node = self.sys.create_fifo_pop( *port);
+                node_remapping_map.insert(*k, pop_node);
+                println!("----FIFO pop: {:?}, key: {:?}", pop_node, k);
+            }
+            println!("node_remapping_map: {:?}", node_remapping_map);
+
+            //at first,we just support the expr needed at buffer test
+            // and also, the expr also need to be ordered
+            let mut ordered_expr_map: Vec<_> =submodule.buffered_expr.iter().collect();
+            ordered_expr_map.sort_by_key(|(key, _value)| *key);
+            for (child_key, base_node) in ordered_expr_map {
+                if base_node.get_kind() == NodeKind::Expr {
+                    let expr = base_node.as_ref::<Expr>(self.sys).unwrap();
                         
+                    println!("new_expr_opcode: {:?}  | dst: {:?} ", expr.get_opcode(), child_key);
+                    for operand_ref in expr.operand_iter() {
+                        let operand = operand_ref.get_value();
+                        println!("new_expr_operand: {:?}", operand.get_key());
+                        if let Some(new_node) = node_remapping_map.get(&operand.get_key()) {
+                            println!("new_node: {:?}", new_node);
+                        }
                     }
-                    
-                    
-                    _ => {
-                        
+                    let opcode = expr.get_opcode();
+                    // copy expr to new module
+                    match opcode {
+                        Opcode::Binary { binop } => match binop {
+                            Binary::Add => {
+                                
+                                self.sys.create_add(
+                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+
+                            },
+                            Binary::Sub => {
+                                self.sys.create_sub(
+                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+                            },
+                            Binary::Mul => {
+                                self.sys.create_mul(
+                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+                            },
+                            Binary::BitwiseAnd | Binary::BitwiseOr | Binary::BitwiseXor => {},
+                            Binary::Shl | Binary::Shr => {},
+                            Binary::Mod => {},
+                          },
+                          Opcode::Cast {  cast} => match cast {
+                            expr::subcode::Cast::BitCast => {
+                                //#TODO need to support the data type
+                                self.sys.create_bitcast(*node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), DataType::int_ty(32));
+                            },
+                            _ => {}
+                            
+                            
+                          },              
+                      _ => {
+
+                        }
                     }
+                    println!("create finished");
                 }
             }
-
-
 
 
                 

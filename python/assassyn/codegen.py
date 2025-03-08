@@ -279,6 +279,9 @@ class CodeGen(visitor.Visitor):
         self.code.append('  let mut module_cut = CutModules::new(&mut sys);')
         self.code.append('  module_cut.set_submodule_container_map( submodule_container_map );')
         self.code.append('  module_cut.print_submodules();')
+        self.code.append('  module_cut.cut_modules();')
+
+        self.code.append('  println!("{}", sys);')
 
   
         config = 'assassyn::xform::Config{ rewrite_wait_until: true }'
