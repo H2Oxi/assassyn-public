@@ -43,7 +43,7 @@ class Adder1(Module):
         f = d * c        
         #log("combi: {} + {} + {}*{} = {} ", a, b, a, b, d)
         #log("combi: {} * {} = {} ", d, c, f)
-        adder.async_called(a = f.bitcast(Int(32)), b = d.bitcast(Int(32)))
+        adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
 
         return f
     

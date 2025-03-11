@@ -21,6 +21,7 @@ use crate::{
   use crate::ir::Block;
   use crate::ir::node::Parented;
   use crate::xform::arbiter::find_module_with_callers;
+  use crate::ir::IntImm;
 
   #[derive(Debug, Clone)]
   pub struct SubModule {
@@ -37,6 +38,7 @@ use crate::{
     sub_module_map: HashMap<usize, SubModule>, // HashMap<key, SubModule>
     sub_module_order: HashMap<usize, usize>, // HashMap<order, SubModule_key>
     caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
+    barrier_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
   }
 
   
@@ -120,7 +122,8 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                     , SubModuleContainer{module_name: module.get_name().to_string()
                         , sub_module_map: HashMap::new()
                         , sub_module_order: HashMap::new()
-                        , caller_expr: HashMap::new()});
+                        , caller_expr: HashMap::new()
+                        , barrier_expr: HashMap::new()});
                 if let Some(module) = self.to_rewrite.take() {
                     visitor.visit_module(module);
                 }
@@ -134,6 +137,7 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().sub_module_map = visitor.graph.submodule_map.clone();
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().sub_module_order = visitor.graph.submodule_order.clone();
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().caller_expr = visitor.graph.caller_expr.clone();
+                self.submodule_container_map.get_mut(&module.get_key()).unwrap().barrier_expr = visitor.graph.barrier_expr.clone();
             }
 
         }
@@ -152,7 +156,7 @@ pub struct DependencyGraph {
   adjacency: Vec<NodeData>,  //  HashMap<mom, childs>
   expr_hashmap: HashMap<usize, BaseNode>,  // HashMap<key, EXPR>
   caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
-
+  barrier_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
 
   barrier_list: Vec<usize>,
   current_module_name: String,
@@ -177,6 +181,7 @@ impl DependencyGraph {
       barrier_list: Vec::new(),
       expr_hashmap: HashMap::new(),
       caller_expr: HashMap::new(),
+      barrier_expr: HashMap::new(),
 
 
       current_module_name: String::new(),
@@ -466,19 +471,35 @@ impl DependencyGraph {
                             let not_save_nodes = expr.get_opcode() == Opcode::FIFOPush || expr.get_opcode() == Opcode::Bind || expr.get_opcode() == Opcode::AsyncCall;
                             if !not_save_nodes
                             {
-                                
-                                for operand in expr.operand_iter() {
-                                    println!("Operand key: {}", operand.get_value().get_key()); 
+                                if expr.get_opcode() == Opcode::Slice 
+                                {
+                                    let oprend_key = expr.get_operand_value(0).unwrap().get_key();
+                                    println!("Operand key: {}", oprend_key); 
                                     // if not in the expr_hashmap.key, then it should be a buffered node    
-                                    if !path.contains(&operand.get_value().get_key()) {
-                                        println!("Buffered node: {:?}", operand.get_value().get_key());
+                                    if !path.contains(&oprend_key) {
+                                        println!("Buffered node: {:?}", oprend_key);
                                         // if not in the buffered_nodes, then it should be a buffered node
-                                        if !self.submodule_barrier_map.get(buffer_node).unwrap().contains(&operand.get_value().get_key()) {
-                                            self.submodule_barrier_map.get_mut(buffer_node).unwrap().push(operand.get_value().get_key());
+                                        if !self.submodule_barrier_map.get(buffer_node).unwrap().contains(&oprend_key) {
+                                            self.submodule_barrier_map.get_mut(buffer_node).unwrap().push(oprend_key);
                                             
                                         }
                                     
-                                    }   
+                                    }  
+                                }
+                                else{
+                                    for operand in expr.operand_iter() {
+                                        println!("Operand key: {}", operand.get_value().get_key()); 
+                                        // if not in the expr_hashmap.key, then it should be a buffered node    
+                                        if !path.contains(&operand.get_value().get_key()) {
+                                            println!("Buffered node: {:?}", operand.get_value().get_key());
+                                            // if not in the buffered_nodes, then it should be a buffered node
+                                            if !self.submodule_barrier_map.get(buffer_node).unwrap().contains(&operand.get_value().get_key()) {
+                                                self.submodule_barrier_map.get_mut(buffer_node).unwrap().push(operand.get_value().get_key());
+
+                                            }
+                                        
+                                        }   
+                                    }
                                 }
                             }
                             else {
@@ -563,10 +584,16 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
     if expr.get_opcode() == Opcode::FIFOPush || is_output {
         self.graph.caller_expr.insert(expr.get_key(), expr.elem);
     }
+
+    if is_barrier{
+        self.graph.barrier_expr.insert(expr.get_key(), expr.elem);
+    }
+
     if !(is_barrier || is_output)
     {
         self.graph.expr_hashmap.insert(expr.get_key(), expr.elem);
         println!("expr_hashmap_insert: {:?}", expr.get_key());
+        println!("opcode: {:?}", expr.get_opcode());
     
         if (expr.get_opcode() == Opcode::Load) || (expr.get_opcode() == Opcode::FIFOPop) {
               self
@@ -585,11 +612,18 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
         }
     
         }else {
-            for operand_ref in expr.operand_iter() {
+            if expr.get_opcode() == Opcode::Slice 
+            {
                 self.graph
-                    .add_edge(operand_ref.get_value().get_key(), expr.get_key());
-                
-                print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
+                        .add_edge(expr.get_operand_value(0).unwrap().get_key(), expr.get_key());
+            }
+            else{
+                for operand_ref in expr.operand_iter() {
+                    self.graph
+                        .add_edge(operand_ref.get_value().get_key(), expr.get_key());
+
+                    print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
+                }
             }
         }
         
@@ -636,10 +670,21 @@ impl<'a> CutModules<'a> {
             // create the new modules inside each module
             let original_module_name = &container.module_name;
 
+            let module_with_multi_caller = find_module_with_callers(self.sys);
+            println!("module_with_multi_caller: {:?}", module_with_multi_caller);
+            let mut new_submodule_caller = HashMap::new();
+            let mut nodes_waiting_for_asyncall = HashMap::new();
 
             // we must make sure the order of the submodule is correct
             let mut sub_module_order_rev: Vec<_> = container.sub_module_order.iter().collect();
             sub_module_order_rev.sort_by_key(|(k, _)| *k);
+
+            //remove the barrier expr
+            for (key, basenode) in container.barrier_expr.iter() {
+                //#TODO need to do remove here
+                basenode.as_mut::<Expr>(self.sys).unwrap().erase_from_parent();
+                
+            }
             
             for (order, submod_key) in sub_module_order_rev {
                 let submodule = container
@@ -647,171 +692,315 @@ impl<'a> CutModules<'a> {
                 .get(submod_key)
                 .expect("Submodule key not found in sub_module_map");
 
-            let new_module_name = format!("{}_{}", original_module_name, order);
-            let new_module_ports: Vec<PortInfo> = submodule
-                .buffered_ports
-                .iter()
-                .map(|port_id| {
-                    //#TODO support change the data type
-                    PortInfo::new(&format!("buffered_{}", port_id), DataType::int_ty(32))
-                })
-                .collect();
-            
-            let new_module = self.sys.create_module(&new_module_name, new_module_ports);
-            self.sys.set_current_module(new_module);
-            println!("new_module_name: {:?}", new_module_name);
-            //FIFO valid Gen
-            let mut last_fifo_valid_handle: Option<BaseNode> = None;
-            let mut ports_remapping_map = HashMap::new();
-            //bind init
-            let bind_init = self.sys.get_init_bind(new_module);
-            
-            for port_id in submodule.buffered_ports.iter() {
-                let actual_port_name = format!("buffered_{}", port_id);
-            
-                let port_handle = {
-                    let module_handle = new_module.as_ref::<Module>(&self.sys).unwrap();
-                    module_handle.get_fifo(&actual_port_name).unwrap().upcast()
-                };
-                ports_remapping_map.insert(*port_id, port_handle);
-                let fifo_valid_handle = self.sys.create_fifo_valid(port_handle);
-            
-                // If we already have a `last_fifo_valid_handle`, combine:
-                if let Some(prev_handle) = last_fifo_valid_handle {
-                    let fifo_valid_comb_handle = self.sys.create_bitwise_and(prev_handle, fifo_valid_handle);
-                    last_fifo_valid_handle = Some(fifo_valid_comb_handle);
-                    println!("Combining old handle = {:?} with new handle = {:?}", 
-                             prev_handle, fifo_valid_handle);
-                }else {
-                    last_fifo_valid_handle = Some(fifo_valid_handle);
+            let mut port_type_map:HashMap<usize,DataType> = HashMap::new();
+
+
+            if *order > 0 {
+                //middle module
+                for port_id in submodule.buffered_ports.iter() {
+                    let right_basenode:BaseNode = *nodes_waiting_for_asyncall.get(port_id).unwrap();
+                    let right = right_basenode.as_ref::<Expr>(self.sys).unwrap();
+                    println!("right type: {:?}",right.elem.get_dtype(self.sys).unwrap());
+                    port_type_map.insert(*port_id, right.elem.get_dtype(self.sys).unwrap());
 
                 }
+
+                let new_module_name = format!("{}_{}", original_module_name, order);
+                let new_module_ports: Vec<PortInfo> = submodule
+                    .buffered_ports
+                    .iter()
+                    .map(|port_id| {
+                        //#TODO support change the data type
+                        PortInfo::new(&format!("buffered_{}", port_id),  port_type_map.get(port_id).unwrap().clone())
+                    })
+                    .collect();
                 
-            }
-            if let Some(fifo_all_valid) = last_fifo_valid_handle {
-                self.sys.create_wait_until(fifo_all_valid);
-            }
-            //FIFO pop Gen
-            //#TODO the barrier connection
-            let mut node_remapping_map = HashMap::new();
-            for (k,port) in ports_remapping_map.iter() {
-                let pop_node = self.sys.create_fifo_pop( *port);
-                node_remapping_map.insert(*k, pop_node);
-                println!("----FIFO pop: {:?}, key: {:?}", pop_node, k);
-            }
-            println!("node_remapping_map: {:?}", node_remapping_map);
+                let new_module = self.sys.create_module(&new_module_name, new_module_ports);
 
-            //at first,we just support the expr needed at buffer test
-            // and also, the expr also need to be ordered
-            let mut ordered_expr_map: Vec<_> =submodule.buffered_expr.iter().collect();
-            ordered_expr_map.sort_by_key(|(key, _value)| *key);
-            for (child_key, base_node) in ordered_expr_map {
-                if base_node.get_kind() == NodeKind::Expr {
-                    let expr = base_node.as_ref::<Expr>(self.sys).unwrap();
-                        
-                    println!("new_expr_opcode: {:?}  | dst: {:?} ", expr.get_opcode(), child_key);
-                    for operand_ref in expr.operand_iter() {
-                        let operand = operand_ref.get_value();
-                        println!("new_expr_operand: {:?}", operand.get_key());
-                        if let Some(new_node) = node_remapping_map.get(&operand.get_key()) {
-                            println!("new_node: {:?}", new_node);
-                        }
+                new_submodule_caller.insert(order,new_module);
+
+                println!("new_module_name: {:?}", new_module_name);
+                //FIFO valid Gen
+                let mut last_fifo_valid_handle: Option<BaseNode> = None;
+                let mut ports_remapping_map = HashMap::new();
+                
+
+                self.sys.set_current_module(new_module);
+                
+                for port_id in submodule.buffered_ports.iter() {
+                    let actual_port_name = format!("buffered_{}", port_id);
+                
+                    let port_handle = {
+                        let module_handle = new_module.as_ref::<Module>(&self.sys).unwrap();
+                        module_handle.get_fifo(&actual_port_name).unwrap().upcast()
+                    };
+                    ports_remapping_map.insert(*port_id, port_handle);
+                    let fifo_valid_handle = self.sys.create_fifo_valid(port_handle);
+                
+                    // If we already have a `last_fifo_valid_handle`, combine:
+                    if let Some(prev_handle) = last_fifo_valid_handle {
+                        let fifo_valid_comb_handle = self.sys.create_bitwise_and(prev_handle, fifo_valid_handle);
+                        last_fifo_valid_handle = Some(fifo_valid_comb_handle);
+                        println!("Combining old handle = {:?} with new handle = {:?}", 
+                                 prev_handle, fifo_valid_handle);
+                    }else {
+                        last_fifo_valid_handle = Some(fifo_valid_handle);
+
                     }
-                    let opcode = expr.get_opcode();
-                    let mut new_expr_handle: Option<BaseNode> = None;
-                    // copy expr to new module
-                    match opcode {
-                        Opcode::Binary { binop } => match binop {
-                            Binary::Add => {
+
+                }
+                if let Some(fifo_all_valid) = last_fifo_valid_handle {
+                    self.sys.create_wait_until(fifo_all_valid);
+                }
+
+                //bind init
+                if *order > 1
+                {
+                    self.sys.set_current_module(*new_submodule_caller.get(&(order - 1)).unwrap());
+                    println!("new_submodule_caller: {:?}", new_submodule_caller.get(&(order - 1)).unwrap());
+                    let bind_init = self.sys.get_init_bind(new_module);
+                    
+                    for port_id in submodule.buffered_ports.iter() {
+
+                        self.sys.bind_arg(
+                            bind_init,
+                            format!("buffered_{}", port_id),
+                            *nodes_waiting_for_asyncall.get(port_id).unwrap()
+                        );
+                    }
+                    self.sys.create_async_call(bind_init); 
+                    nodes_waiting_for_asyncall.clear();
+                }else {
+                    let original_module = self.sys.get_module(original_module_name).unwrap();
+                    self.sys.set_current_module(original_module.elem );
+                    
+                    let bind_init = self.sys.get_init_bind(new_module);
+                    
+                    for port_id in submodule.buffered_ports.iter() {
+
+                        self.sys.bind_arg(
+                            bind_init,
+                            format!("buffered_{}", port_id),
+                            *nodes_waiting_for_asyncall.get(port_id).unwrap()
+                        );
+                    }
+                    self.sys.create_async_call(bind_init); 
+                    nodes_waiting_for_asyncall.clear();
+                }
+             
+
+                self.sys.set_current_module(new_module);
+                //FIFO pop Gen
+                let mut node_remapping_map = HashMap::new();
+                for (k,port) in ports_remapping_map.iter() {
+                    let pop_node = self.sys.create_fifo_pop( *port);
+                    node_remapping_map.insert(*k, pop_node);
+                    println!("----FIFO pop: {:?}, key: {:?}", pop_node, k);
+                }
+                println!("node_remapping_map: {:?}", node_remapping_map);
+                let mut bind_init: Option<BaseNode> = None;
+                let mut bind_node_str_map = HashMap::new();
+                let mut bind_nodes_map:Vec<BaseNode> = Vec::new();
+                let mut nodes_to_remove:Vec<BaseNode> = Vec::new();
+
+                if  *order == (container.sub_module_order.len() - 1) 
+                {
+                    //for barrier_node in submodule.buffered_barriers.iter()  
+
+                    
+                    for expr_key in container.caller_expr.keys() 
+                    {
+                        //get the bind push expr
+                        if let Some(expr) = container.caller_expr.get(expr_key) {
+                            println!("callee_expr: {:?}", expr);
+                            let expr_bind = expr.as_ref::<Expr>(self.sys).unwrap();
+                            if expr_bind.get_opcode() == Opcode::FIFOPush {
+                                println!("expr_bind: {:?}, and  {:?}"
+                                    , expr_bind.get_operand_value(0).as_ref().unwrap().to_string(self.sys) 
+                                    , expr_bind.get_operand_value(1).as_ref().unwrap().to_string(self.sys));
+                                let port_str = expr_bind.get_operand_value(0).as_ref().unwrap().to_string(self.sys);
+                                let node_id = expr_bind.get_operand_value(1).as_ref().unwrap().get_key();
+                                bind_node_str_map.insert(node_id, port_str);
                                 
-                                let new_expr = self.sys.create_add(
-                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
-                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
-                                new_expr_handle = Some(new_expr);
 
-                            },
-                            Binary::Sub => {
-                                let new_expr = self.sys.create_sub(
-                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
-                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
-                                new_expr_handle = Some(new_expr);
-                            },
-                            Binary::Mul => {
-                                let new_expr = self.sys.create_mul(
-                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
-                                    *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
-                                new_expr_handle = Some(new_expr);
-                            },
-                            Binary::BitwiseAnd | Binary::BitwiseOr | Binary::BitwiseXor => {},
-                            Binary::Shl | Binary::Shr => {},
-                            Binary::Mod => {},
-                          },
-                          Opcode::Cast {  cast} => match cast {
-                            expr::subcode::Cast::BitCast => {
-                                //#TODO need to support the data type
-                                let new_expr = self.sys.create_bitcast(
-                                    *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(),
-                                     DataType::int_ty(32));
-                                new_expr_handle = Some(new_expr);
-                            },
-                            _ => {}
-                            
-                            
-                          },              
-                      _ => {
-
+                            }
+                            else if expr_bind.get_opcode() == Opcode::Bind 
+                            {
+                                //#TODO here we assumed only one module was caller as long as having barrier
+                                for (callee,caller) in module_with_multi_caller.iter() {
+                                    if  caller.contains(&expr) {
+                                        println!("callee: {:?}, caller: {:?}", callee, caller);
+                                        let bind_init_temp = self.sys.get_init_bind(*callee);
+                                        bind_init = Some(bind_init_temp);
+                                        
+                                    }
+                                }
+                                bind_nodes_map.push(expr.clone());
+                            }
+                            else if expr_bind.get_opcode() == Opcode::AsyncCall {
+                                bind_nodes_map.push(expr.clone());
+                            }
                         }
                     }
-                    if let Some(new_expr) = new_expr_handle {
-                        node_remapping_map.insert(*child_key, new_expr);
-                        println!("insert_new_expr: {:?}", new_expr);
+
+                }
+
+                //at first,we just support the expr needed at buffer test
+                // and also, the expr also need to be ordered
+                let mut ordered_expr_map: Vec<_> =submodule.buffered_expr.iter().collect();
+                ordered_expr_map.sort_by_key(|(key, _value)| *key);
+                for (child_key, base_node) in ordered_expr_map {
+                    if base_node.get_kind() == NodeKind::Expr {
+                        let expr = base_node.as_ref::<Expr>(self.sys).unwrap();
+
+                        println!("new_expr_opcode: {:?}  | dst: {:?} ", expr.get_opcode(), child_key);
+                        for operand_ref in expr.operand_iter() {
+                            let operand = operand_ref.get_value();
+                            println!("new_expr_operand: {:?}", operand.get_key());
+                            if let Some(new_node) = node_remapping_map.get(&operand.get_key()) {
+                                println!("new_node: {:?}", new_node);
+                            }
+                        }
+                        
+                        let opcode = expr.get_opcode();
+                        let mut new_expr_handle: Option<BaseNode> = None;
+                        // copy expr to new module
+                        match opcode {
+                            Opcode::Binary { binop } => match binop {
+                                Binary::Add => {
+
+                                    let new_expr = self.sys.create_add(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+                                    new_expr_handle = Some(new_expr);
+
+                                },
+                                Binary::Sub => {
+                                    let new_expr = self.sys.create_sub(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                Binary::Mul => {
+                                    let new_expr = self.sys.create_mul(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap());
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                Binary::BitwiseAnd | Binary::BitwiseOr | Binary::BitwiseXor => {},
+                                Binary::Shl | Binary::Shr => {},
+                                Binary::Mod => {},
+                              },
+                              Opcode::Cast {  cast} => match cast {
+                                expr::subcode::Cast::BitCast => {
+                                    //#TODO need to support the data type
+                                    let new_expr = self.sys.create_bitcast(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(),
+                                         DataType::int_ty(32));
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                _ => {}
+                              },
+                              Opcode::Slice => {
+                                let start = expr.get_operand_value(1);
+                                if start.unwrap().get_kind() == NodeKind::IntImm {
+                                    println!("start: {:?}", start.unwrap().as_ref::<IntImm>(self.sys).unwrap().get_value());
+                                }
+                                
+
+                                let end = expr.get_operand_value(2);
+                                if end.unwrap().get_kind() == NodeKind::IntImm {
+                                    println!("end: {:?}", end.unwrap().as_ref::<IntImm>(self.sys).unwrap().get_value());
+                                }
+                                if let Some(start_node) =start {
+                                    if let Some(end_node) = end {
+                                        let new_expr = self.sys.create_slice(
+                                            *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(),
+                                            start_node,
+                                            end_node);
+                                        new_expr_handle = Some(new_expr);
+                                    }
+                                }
+                               
+
+                              
+                              },              
+                          _ => {
+                                println!("-------{:?}   is not supported",opcode);
+                            }
+                        }
+                        if let Some(new_expr) = new_expr_handle {
+                            node_remapping_map.insert(*child_key, new_expr);
+                            println!("insert_new_expr: {:?} with origin key: {:?}", new_expr, *child_key);
+                            //remove the original expr
+                            //#TODO need to be more careful here
+                            println!("base_node parents: {:?}", base_node.get_parent(self.sys));
+                            println!("nodes_to_remove.push : {:?}", base_node);
+                            
+                            nodes_to_remove.push(*base_node);
+                        }
+
+                        println!("create finished");
                     }
                     
-                    println!("create finished");
                 }
-            }
-            //FIFO push Gen
-            //println!("{}", self.sys);
-            //for port_id in submodule.buffered_barriers.iter() {
-            //    println!("port_id: {:?}", port_id);
-            //    self.sys.bind_arg(
-            //        bind_init,
-            //        node_remapping_map.get(port_id).unwrap().to_string(self.sys),
-            //        *node_remapping_map.get(port_id).unwrap()
-            //    );
-            //}
+                //FIFO push Gen
+                for port_id in submodule.buffered_barriers.iter() {
+                    println!("port_id: {:?}", port_id);
+                    nodes_waiting_for_asyncall.insert(port_id,*node_remapping_map.get(port_id).unwrap());
+                }
+                println!("nodes_waiting_for_asyncall: {:?}", nodes_waiting_for_asyncall);
+                if  *order == (container.sub_module_order.len() - 1) 
+                {
 
-            println!("{}", self.sys);
 
-                
-            }
-
-            println!("------------------------------------");
-
-            let module_with_multi_caller = find_module_with_callers(self.sys);
-            println!("module_with_multi_caller: {:?}", module_with_multi_caller);
-            for expr_key in container.caller_expr.keys() {
-                if let Some(expr) = container.caller_expr.get(expr_key) {
-                    println!("callee_expr: {:?}", expr);
-                    for (callee,caller) in module_with_multi_caller.iter() {
-                        if  caller.contains(&expr) {
-                            //#TODO get the output of final submodule,do it here
-                            println!("callee: {:?}, caller: {:?}", callee, caller);
-                        }
+                    let mut bind_expr_map: Vec<_> =container.caller_expr.iter().collect();
+                    bind_expr_map.sort_by_key(|(key, _value)| *key);
+                    bind_expr_map.reverse();
+                    for (k,node) in bind_expr_map {
+                        println!("erase_from_parent: {:?}", node);
+                        node.as_mut::<Expr>(self.sys).unwrap().erase_from_parent();
+                        
                     }
+                    nodes_to_remove.reverse();
+                    for node in nodes_to_remove {
+                        println!("erase_from_parent: {:?}", node);
+                        node.as_mut::<Expr>(self.sys).unwrap().erase_from_parent();
+                    }
+                    
+
+                    if let Some(bind) = bind_init
+                    {
+                        for (node_id,port_str) in bind_node_str_map
+                        {
+                            let test= self.sys.bind_arg(
+                                bind,
+                                port_str,
+                                *node_remapping_map.get(&node_id).unwrap());
+                            println!("bind_arg: {:?}", test);
+                        }
+                        let test= self.sys.create_async_call(bind);
+                        println!("create_async_call: {:?}", test);
+                    }
+                    
                 }
             }
-
-            let mut origin_module = self.sys.get_module(original_module_name).unwrap();
-            //original module as collee
-            if let Some(caller_expr) = module_with_multi_caller.get(&origin_module.elem) {
-                //#TODO change this expr direction to the new module
-                println!("caller_expr: {:?}", caller_expr);
-                
+            else
+            {
+                //FIFO push Gen
+                for port_id in submodule.buffered_barriers.iter() {
+                    println!("port_id: {:?}", port_id);
+                    nodes_waiting_for_asyncall.insert(port_id,submodule.buffered_expr.get(port_id).unwrap().clone());
+                }
             }
             
-            println!("------------------------------------");
-
+            
+    
+            }
+            
+            
+            
+            println!("{}", self.sys);
 
             //try to remove expr
 

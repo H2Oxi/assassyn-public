@@ -227,7 +227,6 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                         for operand in expr.operand_iter() {
                             println!("Operand key: {}", operand.get_value().get_key());
 
-
                             // if not in the expr_hashmap.key, then it should be a buffered node
 
                             if !path.contains(&operand.get_value().get_key()) {
