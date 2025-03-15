@@ -17,29 +17,11 @@ class Adder2(Module):
     def build(self):
         a, b = self.pop_all_ports(True)
         c = a * b
+ 
         d = a + b + c
         log("combi: {} + {} + {}*{} = {} ", a, b, a, b, d)
 
-class Adder1_bridge(Module):
-
-    def __init__(self):
-        super().__init__(
-            ports={
-                'e_barrier': Port(Int(32)),
-                'a_p_b_buffer': Port(Int(32)),
-                'c_buffer': Port(Int(32)),
-            },
-        )
-
-    @module.combinational
-    def build(self,adder: Adder2):
-        e_barrier, a_p_b_buffer , c_buffer= self.pop_all_ports(True)
-
-        d = a_p_b_buffer + e_barrier
-        f = d * c_buffer        
-        log("combi: {} + {}  = {} ", a_p_b_buffer, e_barrier,  d)
-        log("combi: {} * {} = {} ", d, c_buffer, f)
-        adder.async_called(a = f.bitcast(Int(32)), b = d.bitcast(Int(32)))
+        return d
 
 class Adder1(Module):
 
@@ -53,17 +35,19 @@ class Adder1(Module):
         )
 
     @module.combinational
-    def build(self,barrier_module: Adder1_bridge):
+    def build(self,adder: Adder2):
         a, b , c= self.pop_all_ports(True)
         e = a * b
-        a_p_b_buffer = a + b      
-        c_buffer = c
 
-        barrier_module.async_called(e_barrier = e.bitcast(Int(32)), 
-                           a_p_b_buffer = a_p_b_buffer.bitcast(Int(32)),
-                           c_buffer = c_buffer.bitcast(Int(32)))
+        d = a + b + e
+        h = d + Int(32)(1)
+        g = h * h
 
+        f = g * c        
 
+        adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
+
+        return f
     
 
 
@@ -100,13 +84,10 @@ def test_async_call():
     sys = SysBuilder('Comb_barrier_gold')
     with sys:
         adder2 = Adder2()
-        adder2.build()
-
-        adder1_bridge = Adder1_bridge()
-        adder1_bridge.build(adder2)
+        res = adder2.build()
 
         adder1 = Adder1()
-        adder1.build(adder1_bridge)
+        d = adder1.build(adder2)
 
         driver = Driver()
         driver.build(adder1)

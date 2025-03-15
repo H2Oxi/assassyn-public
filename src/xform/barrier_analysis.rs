@@ -22,13 +22,15 @@ use crate::{
   use crate::ir::node::Parented;
   use crate::xform::arbiter::find_module_with_callers;
   use crate::ir::IntImm;
+  use crate::ir::node::BlockRef;
 
   #[derive(Debug, Clone)]
   pub struct SubModule {
     buffered_barriers: Vec<usize>, 
     buffered_ports: Vec<usize>,
     buffered_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
-    
+    buffered_block: usize,  //  block_key of the buffered ports' caller
+    bypass_ports: Vec<usize>,
 
   }
 
@@ -39,6 +41,8 @@ use crate::{
     sub_module_order: HashMap<usize, usize>, // HashMap<order, SubModule_key>
     caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
     barrier_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
+    block_map: HashMap<usize, BaseNode>,  //HashMap<parent_key, Block>  block as the parent of expr
+    block_expr: HashMap<usize, BaseNode>,  //HashMap<parent_key, BlockEXPR>  block intrinsic
   }
 
   
@@ -123,7 +127,9 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                         , sub_module_map: HashMap::new()
                         , sub_module_order: HashMap::new()
                         , caller_expr: HashMap::new()
-                        , barrier_expr: HashMap::new()});
+                        , barrier_expr: HashMap::new()
+                        , block_map: HashMap::new()
+                        , block_expr: HashMap::new()});
                 if let Some(module) = self.to_rewrite.take() {
                     visitor.visit_module(module);
                 }
@@ -138,6 +144,8 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().sub_module_order = visitor.graph.submodule_order.clone();
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().caller_expr = visitor.graph.caller_expr.clone();
                 self.submodule_container_map.get_mut(&module.get_key()).unwrap().barrier_expr = visitor.graph.barrier_expr.clone();
+                self.submodule_container_map.get_mut(&module.get_key()).unwrap().block_map = visitor.graph.block_map.clone();
+                self.submodule_container_map.get_mut(&module.get_key()).unwrap().block_expr = visitor.graph.block_expr.clone();
             }
 
         }
@@ -157,6 +165,8 @@ pub struct DependencyGraph {
   expr_hashmap: HashMap<usize, BaseNode>,  // HashMap<key, EXPR>
   caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
   barrier_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
+  block_map: HashMap<usize, BaseNode>,  //HashMap<parent_key, Block>  block as the parent of expr
+  block_expr: HashMap<usize, BaseNode>,  //HashMap<parent_key, BlockEXPR>  block intrinsic
 
   barrier_list: Vec<usize>,
   current_module_name: String,
@@ -165,6 +175,7 @@ pub struct DependencyGraph {
   module_outputs: Vec<usize>,
   submodule_map: HashMap<usize, SubModule>, // HashMap<key, SubModule>
   submodule_order: HashMap<usize, usize>, // HashMap<order, SubModule_key>
+  submodule_barrier_block_map: HashMap<usize, usize>, // HashMap<barrier_key, block_key>
  
 }
 
@@ -182,7 +193,9 @@ impl DependencyGraph {
       expr_hashmap: HashMap::new(),
       caller_expr: HashMap::new(),
       barrier_expr: HashMap::new(),
-
+      block_map: HashMap::new(),
+      block_expr: HashMap::new(),
+      
 
       current_module_name: String::new(),
       submodule_barrier_map: HashMap::new(),
@@ -190,6 +203,7 @@ impl DependencyGraph {
       module_outputs: Vec::new(),
       submodule_map: HashMap::new(),
       submodule_order: HashMap::new(),
+      submodule_barrier_block_map: HashMap::new(),
     }
   }
 
@@ -219,6 +233,7 @@ impl DependencyGraph {
       expr_hashmap: &HashMap<usize, BaseNode>,
       module_outputs: &Vec<usize>,
       used_nodes: &mut Vec<usize>,
+      submodule_barrier_block_map: &HashMap<usize, usize>,
 
     ) {
       path.push(current);
@@ -245,9 +260,12 @@ impl DependencyGraph {
                       .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
                       .unwrap()
                       .buffered_barriers = submodule_barrier_map.get(&submodule_key).unwrap().clone();
+                  //save the buffered block for new submodule
                   //save ports for new submodule
+                  
                   submodule_map.insert(submodule_key, SubModule{buffered_barriers: Vec::new(), 
-                      buffered_ports: submodule_barrier_map.get(&submodule_key).unwrap().clone(), buffered_expr: HashMap::new()});
+                      buffered_ports: submodule_barrier_map.get(&submodule_key).unwrap().clone(),
+                       buffered_expr: HashMap::new(), buffered_block: submodule_barrier_block_map.get(&submodule_key).unwrap().clone(), bypass_ports: Vec::new()});
               }
               else{
                   if submodule_map.get(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap().buffered_ports.contains(&current_clone) {
@@ -281,6 +299,7 @@ impl DependencyGraph {
       println!("submodule_map_get_mut: {:?}", submodule_map.get_mut(submodule_order.get(&(*current_level as usize)).unwrap()).unwrap());
       println!("------current: {:?}", current);
       println!("expr_hashmap: {:?}", expr_hashmap.get(&current).unwrap());
+
                   
                   
       let mut has_child = false;
@@ -318,6 +337,7 @@ impl DependencyGraph {
                     expr_hashmap,
                     module_outputs,
                     used_nodes,
+                    submodule_barrier_block_map,
                   );
                 }
 
@@ -339,6 +359,13 @@ impl DependencyGraph {
         }
       }
       used_nodes.push(current as usize);
+      if module_outputs.contains(&current) {
+        submodule_map
+            .get_mut(submodule_order.get(&(*current_level as usize)).unwrap())
+            .unwrap()
+            .bypass_ports.push(current);
+        println!("bypass_ports: {:?}", current);
+      }
       println!("used_nodes: {:?}", used_nodes);
 
       path.pop();
@@ -358,7 +385,9 @@ impl DependencyGraph {
         //create the first submodule_map
         if self.submodule_map.is_empty() {
             println!("Create the first submodule_map");
-            self.submodule_map.insert(*module_port, SubModule{buffered_barriers: Vec::new(), buffered_ports: self.module_ports.clone(), buffered_expr: HashMap::new()});
+            self.submodule_map.insert(*module_port, SubModule{buffered_barriers: Vec::new(),
+                 buffered_ports: self.module_ports.clone(),
+                  buffered_expr: HashMap::new(), buffered_block: 0, bypass_ports: Vec::new()});
             self.submodule_order.insert(0, *module_port);
             println!("submodule_order: {:?}", self.submodule_order);
         }
@@ -376,6 +405,7 @@ impl DependencyGraph {
           &self.expr_hashmap,
           &self.module_outputs,
           &mut used_nodes,
+          &self.submodule_barrier_block_map,
         );
     
 
@@ -489,16 +519,21 @@ impl DependencyGraph {
                                 else{
                                     for operand in expr.operand_iter() {
                                         println!("Operand key: {}", operand.get_value().get_key()); 
-                                        // if not in the expr_hashmap.key, then it should be a buffered node    
-                                        if !path.contains(&operand.get_value().get_key()) {
-                                            println!("Buffered node: {:?}", operand.get_value().get_key());
-                                            // if not in the buffered_nodes, then it should be a buffered node
-                                            if !self.submodule_barrier_map.get(buffer_node).unwrap().contains(&operand.get_value().get_key()) {
-                                                self.submodule_barrier_map.get_mut(buffer_node).unwrap().push(operand.get_value().get_key());
+                                        if operand.get_value().get_kind() == NodeKind::IntImm {
+                        
+                                        }
+                                        else {
+                                            // if not in the expr_hashmap.key, then it should be a buffered node    
+                                            if !path.contains(&operand.get_value().get_key()) {
+                                                println!("Buffered node: {:?}", operand.get_value().get_key());
+                                                // if not in the buffered_nodes, then it should be a buffered node
+                                                if !self.submodule_barrier_map.get(buffer_node).unwrap().contains(&operand.get_value().get_key()) {
+                                                    self.submodule_barrier_map.get_mut(buffer_node).unwrap().push(operand.get_value().get_key());
 
-                                            }
-                                        
-                                        }   
+                                                }
+                                            
+                                            }  
+                                        } 
                                     }
                                 }
                             }
@@ -563,13 +598,18 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
 
     let mut is_barrier = false;
     let mut is_output = false;
+    let mut is_condition = false;
 
     match expr.get_opcode() {
         Opcode::BlockIntrinsic { intrinsic } => {
             if intrinsic == subcode::BlockIntrinsic::Barrier {
                 println!("Buffered expr: {:?}", expr.get_operand_value(0).as_ref().unwrap().get_key());
                 self.graph.barrier_list.push(expr.get_operand_value(0).as_ref().unwrap().get_key());
+                self.graph.submodule_barrier_block_map.insert(expr.get_operand_value(0).as_ref().unwrap().get_key(), expr.get_parent().get_key());
                 is_barrier = true;
+            }
+            if intrinsic == subcode::BlockIntrinsic::Condition {
+                is_condition = true;
             }
         }
         Opcode::Bind => {
@@ -578,6 +618,7 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
         Opcode::AsyncCall => {
             is_output = true;
         }
+
 
         _ => {is_barrier = false; is_output = false;}
     }
@@ -589,7 +630,11 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
         self.graph.barrier_expr.insert(expr.get_key(), expr.elem);
     }
 
-    if !(is_barrier || is_output)
+    if is_condition {
+        self.graph.block_expr.insert(expr.get_parent().get_key(), expr.elem);
+    }
+
+    if !(is_barrier || is_output || is_condition)
     {
         self.graph.expr_hashmap.insert(expr.get_key(), expr.elem);
         println!("expr_hashmap_insert: {:?}", expr.get_key());
@@ -619,14 +664,30 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys>  {
             }
             else{
                 for operand_ref in expr.operand_iter() {
-                    self.graph
-                        .add_edge(operand_ref.get_value().get_key(), expr.get_key());
+                    if operand_ref.get_value().get_kind() == NodeKind::IntImm {
+                        
+                    }
+                    else {
+                        self.graph
+                            .add_edge(operand_ref.get_value().get_key(), expr.get_key());
+                        print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
+                    }
 
-                    print!("mom: {:?},child: {:?}", operand_ref.get_value().get_key(), expr.get_key());
                 }
             }
         }
         
+    }
+    None
+  }
+  fn visit_block(&mut self, block: BlockRef<'_>) -> Option<()> {
+    println!("Block: {:?}", block.get_key());
+    self.graph.block_map.insert(block.get_key(), block.elem);
+    for elem in block.body_iter() {
+      println!("elem: {:?}", elem.get_key());
+      if let Some(x) = self.dispatch(block.sys, &elem, vec![]) {
+        return Some(x);
+      }
     }
     None
   }
@@ -669,11 +730,14 @@ impl<'a> CutModules<'a> {
         for (container_key, container) in self.submodule_container_map.iter() {
             // create the new modules inside each module
             let original_module_name = &container.module_name;
+            let root_block_key = container_key + 1;
 
             let module_with_multi_caller = find_module_with_callers(self.sys);
             println!("module_with_multi_caller: {:?}", module_with_multi_caller);
             let mut new_submodule_caller = HashMap::new();
             let mut nodes_waiting_for_asyncall = HashMap::new();
+            let mut local_bypass_map:HashMap<usize, BaseNode> = HashMap::new();
+            
 
             // we must make sure the order of the submodule is correct
             let mut sub_module_order_rev: Vec<_> = container.sub_module_order.iter().collect();
@@ -693,20 +757,21 @@ impl<'a> CutModules<'a> {
                 .expect("Submodule key not found in sub_module_map");
 
             let mut port_type_map:HashMap<usize,DataType> = HashMap::new();
-
+            let mut block_remapping_map = HashMap::new();
 
             if *order > 0 {
+                let mut real_ports:Vec<usize> = Vec::new();
                 //middle module
                 for port_id in submodule.buffered_ports.iter() {
                     let right_basenode:BaseNode = *nodes_waiting_for_asyncall.get(port_id).unwrap();
                     let right = right_basenode.as_ref::<Expr>(self.sys).unwrap();
                     println!("right type: {:?}",right.elem.get_dtype(self.sys).unwrap());
                     port_type_map.insert(*port_id, right.elem.get_dtype(self.sys).unwrap());
-
+                    real_ports.push(*port_id);
                 }
 
                 let new_module_name = format!("{}_{}", original_module_name, order);
-                let new_module_ports: Vec<PortInfo> = submodule
+                let mut new_module_ports: Vec<PortInfo> = submodule
                     .buffered_ports
                     .iter()
                     .map(|port_id| {
@@ -714,6 +779,16 @@ impl<'a> CutModules<'a> {
                         PortInfo::new(&format!("buffered_{}", port_id),  port_type_map.get(port_id).unwrap().clone())
                     })
                     .collect();
+
+                for (port_id,basenode) in local_bypass_map.iter() {
+                    if basenode.get_kind() == NodeKind::Expr {
+                        let right = basenode.as_ref::<Expr>(self.sys).unwrap();
+                        new_module_ports.push(PortInfo::new(&format!("buffered_{}", port_id), right.elem.get_dtype(self.sys).unwrap()));
+                        real_ports.push(*port_id);
+                        println!("local bypass port: {:?}", port_id);
+                    }
+
+                }
                 
                 let new_module = self.sys.create_module(&new_module_name, new_module_ports);
 
@@ -724,10 +799,11 @@ impl<'a> CutModules<'a> {
                 let mut last_fifo_valid_handle: Option<BaseNode> = None;
                 let mut ports_remapping_map = HashMap::new();
                 
-
                 self.sys.set_current_module(new_module);
+
                 
-                for port_id in submodule.buffered_ports.iter() {
+                for port_id in real_ports.iter() {
+                    println!("port_id: {:?}", port_id);
                     let actual_port_name = format!("buffered_{}", port_id);
                 
                     let port_handle = {
@@ -758,36 +834,40 @@ impl<'a> CutModules<'a> {
                 {
                     self.sys.set_current_module(*new_submodule_caller.get(&(order - 1)).unwrap());
                     println!("new_submodule_caller: {:?}", new_submodule_caller.get(&(order - 1)).unwrap());
-                    let bind_init = self.sys.get_init_bind(new_module);
-                    
-                    for port_id in submodule.buffered_ports.iter() {
-
-                        self.sys.bind_arg(
-                            bind_init,
-                            format!("buffered_{}", port_id),
-                            *nodes_waiting_for_asyncall.get(port_id).unwrap()
-                        );
+                    println!("block_key: {:?}", submodule.buffered_block);
+                    if submodule.buffered_block != root_block_key
+                    {
+                        self.sys.set_current_block(*block_remapping_map.get(&submodule.buffered_block).unwrap());
                     }
-                    self.sys.create_async_call(bind_init); 
-                    nodes_waiting_for_asyncall.clear();
+
                 }else {
+                    //order == 1,use original module as the caller
                     let original_module = self.sys.get_module(original_module_name).unwrap();
                     self.sys.set_current_module(original_module.elem );
+                    self.sys.set_current_block(*container.block_map.get(&submodule.buffered_block).unwrap());
                     
-                    let bind_init = self.sys.get_init_bind(new_module);
-                    
-                    for port_id in submodule.buffered_ports.iter() {
-
-                        self.sys.bind_arg(
-                            bind_init,
-                            format!("buffered_{}", port_id),
-                            *nodes_waiting_for_asyncall.get(port_id).unwrap()
-                        );
-                    }
-                    self.sys.create_async_call(bind_init); 
-                    nodes_waiting_for_asyncall.clear();
                 }
-             
+                let bind_init = self.sys.get_init_bind(new_module);
+                    
+                for port_id in submodule.buffered_ports.iter() {
+
+                    self.sys.bind_arg(
+                        bind_init,
+                        format!("buffered_{}", port_id),
+                        *nodes_waiting_for_asyncall.get(port_id).unwrap()
+                    );
+                }
+                
+                nodes_waiting_for_asyncall.clear();
+
+                for (port_id,node) in local_bypass_map.iter() {
+                    self.sys.bind_arg(
+                        bind_init,
+                        format!("buffered_{}", port_id),
+                        *node
+                    );
+                }
+                self.sys.create_async_call(bind_init); 
 
                 self.sys.set_current_module(new_module);
                 //FIFO pop Gen
@@ -800,8 +880,11 @@ impl<'a> CutModules<'a> {
                 println!("node_remapping_map: {:?}", node_remapping_map);
                 let mut bind_init: Option<BaseNode> = None;
                 let mut bind_node_str_map = HashMap::new();
+                let mut bind_node_parent_map = HashMap::new();
                 let mut bind_nodes_map:Vec<BaseNode> = Vec::new();
                 let mut nodes_to_remove:Vec<BaseNode> = Vec::new();
+                
+                let mut block_noneed_map:Vec<usize> = Vec::new();
 
                 if  *order == (container.sub_module_order.len() - 1) 
                 {
@@ -812,7 +895,7 @@ impl<'a> CutModules<'a> {
                     {
                         //get the bind push expr
                         if let Some(expr) = container.caller_expr.get(expr_key) {
-                            println!("callee_expr: {:?}", expr);
+                            println!("caller_expr: {:?}", expr);
                             let expr_bind = expr.as_ref::<Expr>(self.sys).unwrap();
                             if expr_bind.get_opcode() == Opcode::FIFOPush {
                                 println!("expr_bind: {:?}, and  {:?}"
@@ -821,7 +904,8 @@ impl<'a> CutModules<'a> {
                                 let port_str = expr_bind.get_operand_value(0).as_ref().unwrap().to_string(self.sys);
                                 let node_id = expr_bind.get_operand_value(1).as_ref().unwrap().get_key();
                                 bind_node_str_map.insert(node_id, port_str);
-                                
+                                println!("Push parent: {:?}", expr.get_parent(self.sys).unwrap().get_key());
+                                bind_node_parent_map.insert(node_id, expr.get_parent(self.sys).unwrap().get_key());
 
                             }
                             else if expr_bind.get_opcode() == Opcode::Bind 
@@ -832,13 +916,15 @@ impl<'a> CutModules<'a> {
                                         println!("callee: {:?}, caller: {:?}", callee, caller);
                                         let bind_init_temp = self.sys.get_init_bind(*callee);
                                         bind_init = Some(bind_init_temp);
-                                        
+                                        println!("Bind parent: {:?}", expr.get_parent(self.sys).unwrap().get_key());
                                     }
                                 }
                                 bind_nodes_map.push(expr.clone());
                             }
                             else if expr_bind.get_opcode() == Opcode::AsyncCall {
                                 bind_nodes_map.push(expr.clone());
+                                bind_node_parent_map.insert(0, expr.get_parent(self.sys).unwrap().get_key());
+                                println!("AsyncCall parent: {:?}", expr.get_parent(self.sys).unwrap().get_key());
                             }
                         }
                     }
@@ -852,7 +938,8 @@ impl<'a> CutModules<'a> {
                 for (child_key, base_node) in ordered_expr_map {
                     if base_node.get_kind() == NodeKind::Expr {
                         let expr = base_node.as_ref::<Expr>(self.sys).unwrap();
-
+                        //need to check the expr has valid parent
+                        let parent_key = expr.get_parent().get_key();
                         println!("new_expr_opcode: {:?}  | dst: {:?} ", expr.get_opcode(), child_key);
                         for operand_ref in expr.operand_iter() {
                             let operand = operand_ref.get_value();
@@ -860,9 +947,19 @@ impl<'a> CutModules<'a> {
                             if let Some(new_node) = node_remapping_map.get(&operand.get_key()) {
                                 println!("new_node: {:?}", new_node);
                             }
+                            else {
+                                if operand.get_kind() == NodeKind::IntImm {
+                                    println!("Imm_node: {:?}", operand.get_key());
+                                    node_remapping_map.insert(operand.get_key(), *operand);
+                                }
+                            
+                            }
                         }
-                        
                         let opcode = expr.get_opcode();
+                        
+
+                        
+                        
                         let mut new_expr_handle: Option<BaseNode> = None;
                         // copy expr to new module
                         match opcode {
@@ -922,14 +1019,100 @@ impl<'a> CutModules<'a> {
                                     }
                                 }
                                
-
                               
-                              },              
+                              }, 
+                              Opcode::Compare { cmp } => match cmp
+                              {
+                                expr::subcode::Compare::IGT => {
+                                    let new_expr =self.sys.create_igt(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                expr::subcode::Compare::IGE=> {
+                                    let new_expr =self.sys.create_ige(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                expr::subcode::Compare::ILT=> {
+                                    let new_expr =self.sys.create_ilt(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                expr::subcode::Compare::ILE=> {
+                                    let new_expr =self.sys.create_ile(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                expr::subcode::Compare::EQ => {
+                                    let new_expr =self.sys.create_eq(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                expr::subcode::Compare::NEQ=> {
+                                    let new_expr =self.sys.create_neq(
+                                        *node_remapping_map.get(&expr.get_operand_value(0).as_ref().unwrap().get_key()).unwrap(), 
+                                        *node_remapping_map.get(&expr.get_operand_value(1).as_ref().unwrap().get_key()).unwrap() );
+                                    new_expr_handle = Some(new_expr);
+                                },
+                                
+                              },
                           _ => {
                                 println!("-------{:?}   is not supported",opcode);
                             }
                         }
+                        let mut need_change_parent = false;
+                        if parent_key != root_block_key {
+                            need_change_parent = true;
+                            if !block_remapping_map.contains_key(&parent_key) 
+                            {
+                                //#TODO need to think about the case that the child is also a block
+                                //create new block and move the current expr to the new block
+                                if let Some(block_intrinsic) =  container.block_expr.get(&parent_key) {
+                                    let block_expr = block_intrinsic.as_ref::<Expr>(self.sys).unwrap();
+                                    let opcode = block_expr.get_opcode();
+                                    let cond = block_expr.get_operand_value(0).unwrap().get_key();
+                                    match opcode {
+                                        Opcode::BlockIntrinsic { intrinsic } => {
+                                            if intrinsic == subcode::BlockIntrinsic::Condition {
+                                                println!("cond: {:?}", cond);
+                                                if  node_remapping_map.contains_key(&cond) {  
+                                                        let new_condition_block = self.sys.create_conditional_block(*node_remapping_map.get(&cond).unwrap() );
+                                                        block_remapping_map.insert(parent_key, new_condition_block);
+                                                        nodes_to_remove.push(*block_intrinsic);
+                                                }
+                                                else{
+                                                    block_noneed_map.push(parent_key);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+
+                                }
+                                println!("need to create new block");
+                            }
+                            if block_noneed_map.contains(&parent_key) {
+                                need_change_parent = false;
+                            }
+                        }
+                        else{
+
+                            //#TODO need to add the support for the root block remapping
+                        }
+
                         if let Some(new_expr) = new_expr_handle {
+
+                            if need_change_parent {
+                                let at = self.sys.get_insert_point();
+                                self.sys.move_to_new_parent(new_expr, *block_remapping_map.get(&parent_key).unwrap() , at.at);
+                                
+                            }
+
                             node_remapping_map.insert(*child_key, new_expr);
                             println!("insert_new_expr: {:?} with origin key: {:?}", new_expr, *child_key);
                             //remove the original expr
@@ -949,11 +1132,19 @@ impl<'a> CutModules<'a> {
                     println!("port_id: {:?}", port_id);
                     nodes_waiting_for_asyncall.insert(port_id,*node_remapping_map.get(port_id).unwrap());
                 }
+                
+                for port_id in submodule.bypass_ports.iter() {
+                    if !nodes_waiting_for_asyncall.contains_key(&port_id) {
+                        local_bypass_map.insert(*port_id, *node_remapping_map.get(port_id).unwrap());
+                    }
+                    
+                }
+                
                 println!("nodes_waiting_for_asyncall: {:?}", nodes_waiting_for_asyncall);
                 if  *order == (container.sub_module_order.len() - 1) 
                 {
 
-
+                    
                     let mut bind_expr_map: Vec<_> =container.caller_expr.iter().collect();
                     bind_expr_map.sort_by_key(|(key, _value)| *key);
                     bind_expr_map.reverse();
@@ -967,6 +1158,7 @@ impl<'a> CutModules<'a> {
                         println!("erase_from_parent: {:?}", node);
                         node.as_mut::<Expr>(self.sys).unwrap().erase_from_parent();
                     }
+                     
                     
 
                     if let Some(bind) = bind_init
@@ -978,9 +1170,26 @@ impl<'a> CutModules<'a> {
                                 port_str,
                                 *node_remapping_map.get(&node_id).unwrap());
                             println!("bind_arg: {:?}", test);
+
+                            if !block_noneed_map.contains(bind_node_parent_map.get(&node_id).unwrap()) {    
+                                if *bind_node_parent_map.get(&node_id).unwrap() != root_block_key {
+                                    let at = self.sys.get_insert_point();
+                                    self.sys.move_to_new_parent(test, *block_remapping_map.get(bind_node_parent_map.get(&node_id).unwrap()).unwrap() , at.at);
+                                }
+                            }
                         }
-                        let test= self.sys.create_async_call(bind);
-                        println!("create_async_call: {:?}", test);
+                        
+                        if (*bind_node_parent_map.get(&0).unwrap() != root_block_key)&&(!block_noneed_map.contains(bind_node_parent_map.get(&0).unwrap())) {
+                            let at = self.sys.get_insert_point();
+                            self.sys.set_current_block(*block_remapping_map.get(bind_node_parent_map.get(&0).unwrap()).unwrap());
+                            let test= self.sys.create_async_call(bind);
+                            println!("create_async_call: {:?}", test);
+                            self.sys.set_insert_point(at);
+                        }
+                        else{
+                            let test= self.sys.create_async_call(bind);
+                            println!("create_async_call: {:?}", test);
+                        }
                     }
                     
                 }
@@ -994,10 +1203,7 @@ impl<'a> CutModules<'a> {
                 }
             }
             
-            
-    
             }
-            
             
             
             println!("{}", self.sys);
@@ -1007,8 +1213,6 @@ impl<'a> CutModules<'a> {
             //get to the original module
             //self.sys.slab.remove(self.sys.get_module(original_module_name).unwrap().get_key());
             
-
-
             //assign the push at the final module
 
             

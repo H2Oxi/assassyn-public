@@ -23,7 +23,32 @@ class Adder2(Module):
 
         return d
 
+# Condition 2: The barrier is inside the conditional block
 class Adder1(Module):
+
+    def __init__(self):
+        super().__init__(
+            ports={
+                'a': Port(Int(32)),
+                'b': Port(Int(32)),
+                'c': Port(Int(32)),
+            },
+        )
+
+    @module.combinational
+    def build(self,adder: Adder2):
+        a, b , c= self.pop_all_ports(True)
+        e = a * b
+        with Condition(e < Int(64)(100)):
+            d = a + b + e
+            barrier(d)
+            f = d * c        
+            adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
+
+        return f
+
+# condition 1: barrier is outside the condition block
+'''class Adder1(Module):
 
     def __init__(self):
         super().__init__(
@@ -40,15 +65,12 @@ class Adder1(Module):
         e = a * b
         barrier(e)
         d = a + b + e
-        h = d + Int(32)(1)
-        g = h * h
-        barrier(g)
-        f = g * c        
+        with Condition(d.bitcast(Int(32)) < Int(32)(100)):
+            f = d * c        
+            adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
 
-        adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
+        return f'''
 
-        return f
-    
 
 
 class Driver(Module):
@@ -81,7 +103,7 @@ class Driver(Module):
 
 
 def test_async_call():
-    sys = SysBuilder('Comb_barrier')
+    sys = SysBuilder('Comb_block_barrier')
     with sys:
         adder2 = Adder2()
         res = adder2.build()
