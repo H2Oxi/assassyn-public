@@ -886,8 +886,6 @@ fn elaborate_impl(sys: &SysBuilder, config: &Config) -> Result<PathBuf, std::io:
 }
 
 pub fn elaborate(sys: &SysBuilder, config: &Config) -> Result<PathBuf, std::io::Error> {
-
-
   let manifest = elaborate_impl(sys, config)?;
   let output = Command::new("cargo")
     .arg("fmt")
