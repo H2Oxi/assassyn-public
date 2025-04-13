@@ -50,7 +50,7 @@ class Adder1(Module):
             },
         )
 
-    @module.combinationalzs
+    @module.combinational
     def build(self,barrier_module: Adder1_bridge):
         a, b , c= self.pop_all_ports(True)
         e = a * b
@@ -164,14 +164,10 @@ def test_async_call():
             random=True)
 
     #simulator_path, verilator_path = elaborate(sys, **config)
-    simulator_path = elaborate(sys, **config)
+    simulator_path, verilator_path = elaborate(sys, **config)
 
     raw = utils.run_simulator(simulator_path)
-    #check_raw(raw)
 
-    #if verilator_path:
-    #    raw = utils.run_verilator(verilator_path)
-        #check_raw(raw)
 
 
 if __name__ == '__main__':
