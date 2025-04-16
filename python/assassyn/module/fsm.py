@@ -25,7 +25,7 @@ class FSM:# pylint: disable=R0903
 
 
 
-    def generate(self,func_dict):
+    def generate(self,func_dict,mux_dict=None):
         '''Build FSM.'''
         state_reg = self.state_reg
         for state_name in self.transition_table:
@@ -38,3 +38,6 @@ class FSM:# pylint: disable=R0903
                     print(f"Condition: {condition}, Next state: {next_state}")
                     with Condition(condition):
                         state_reg[0] = self.state_map[next_state]
+        for value in mux_dict:
+            for state_name,right_v in mux_dict[value].items():
+                value = ( state_reg[0] == self.state_map[state_name]).select(right_v, value)
