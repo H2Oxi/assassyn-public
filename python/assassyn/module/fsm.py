@@ -38,6 +38,7 @@ class FSM:# pylint: disable=R0903
                     print(f"Condition: {condition}, Next state: {next_state}")
                     with Condition(condition):
                         state_reg[0] = self.state_map[next_state]
-        for value in mux_dict:
-            for state_name,right_v in mux_dict[value].items():
-                value = ( state_reg[0] == self.state_map[state_name]).select(right_v, value)
+        if mux_dict is not None:
+            for value in mux_dict:
+                for state_name,right_v in mux_dict[value].items():
+                    value = ( state_reg[0] == self.state_map[state_name]).select(right_v, value)
