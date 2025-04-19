@@ -1,5 +1,17 @@
+use crate::builder::PortInfo;
+use crate::ir::expr::subcode::Binary;
+use crate::ir::instructions;
+use crate::ir::node::BlockRef;
 use crate::ir::node::ExprRef;
 use crate::ir::node::IsElement;
+use crate::ir::node::NodeKind;
+use crate::ir::node::Parented;
+use crate::ir::Block;
+use crate::ir::DataType;
+use crate::ir::Expr;
+use crate::ir::IntImm;
+use crate::ir::Module;
+use crate::xform::arbiter::find_module_with_callers;
 use crate::{
   builder::{system::ModuleKind, SysBuilder},
   ir::{
@@ -12,18 +24,6 @@ use crate::{
   },
 };
 use std::{collections::HashMap, hash::Hash};
-use crate::ir::instructions;
-use crate::builder::PortInfo;
-use crate::ir::expr::subcode::Binary;
-use crate::ir::node::BlockRef;
-use crate::ir::node::NodeKind;
-use crate::ir::node::Parented;
-use crate::ir::Block;
-use crate::ir::DataType;
-use crate::ir::Expr;
-use crate::ir::IntImm;
-use crate::ir::Module;
-use crate::xform::arbiter::find_module_with_callers;
 
 #[derive(Debug, Clone)]
 pub struct SubModule {
@@ -43,7 +43,6 @@ pub struct SubModuleImage {
   block_map: HashMap<usize, BaseNode>, //HashMap<parent_key, Block>  block as the parent of expr
   block_expr: HashMap<usize, BaseNode>, //HashMap<parent_key, BlockEXPR>  block intrinsic
 }
-
 
 #[derive(Debug, Clone)]
 pub struct SubModuleContainer {
@@ -151,7 +150,6 @@ impl<'sys> Visitor<()> for GatherModulesToCut<'sys> {
           .get_mut(&module.get_key())
           .unwrap()
           .sub_module_image = visitor.graph.submodule_image.clone();
-        
       }
     }
     Some(())
@@ -167,13 +165,13 @@ pub struct NodeData {
 pub struct DependencyGraph {
   adjacency: Vec<NodeData>,               //  HashMap<mom, childs>
   expr_hashmap: HashMap<usize, BaseNode>, // HashMap<key, EXPR>
-  submodule_image: SubModuleImage,  
-    //caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
-    //barrier_expr: HashMap<usize, BaseNode>, // HashMap<childs_key, EXPR>
-    //block_map: HashMap<usize, BaseNode>,    //HashMap<parent_key, Block>  block as the parent of expr
-    //block_expr: HashMap<usize, BaseNode>,   //HashMap<parent_key, BlockEXPR>  block intrinsic
-    //submodule_map: HashMap<usize, SubModule>, // HashMap<key, SubModule>
-    //submodule_order: HashMap<usize, usize>,   // HashMap<order, SubModule_key>
+  submodule_image: SubModuleImage,
+  //caller_expr: HashMap<usize, BaseNode>,  // HashMap<childs_key, EXPR>
+  //barrier_expr: HashMap<usize, BaseNode>, // HashMap<childs_key, EXPR>
+  //block_map: HashMap<usize, BaseNode>,    //HashMap<parent_key, Block>  block as the parent of expr
+  //block_expr: HashMap<usize, BaseNode>,   //HashMap<parent_key, BlockEXPR>  block intrinsic
+  //submodule_map: HashMap<usize, SubModule>, // HashMap<key, SubModule>
+  //submodule_order: HashMap<usize, usize>,   // HashMap<order, SubModule_key>
   barrier_list: Vec<usize>,
   current_module_name: String,
   submodule_barrier_map: HashMap<usize, Vec<usize>>, // HashMap<submodule_key, Vec<barrier_key>>
@@ -413,7 +411,10 @@ impl DependencyGraph {
             bypass_ports: Vec::new(),
           },
         );
-        self.submodule_image.sub_module_order.insert(0, *module_port);
+        self
+          .submodule_image
+          .sub_module_order
+          .insert(0, *module_port);
         println!("submodule_order: {:?}", self.submodule_image.sub_module_order);
       }
       //need to change dfs to support
@@ -503,12 +504,8 @@ impl DependencyGraph {
                 if let Ok(expr) = base_node.as_ref::<Expr>(sys) {
                   println!("Processing expression operands for Expr: {}", expr.get_name());
                   let opcode = expr.get_opcode();
-                  let not_save_nodes = matches!(
-                      opcode,
-                      Opcode::FIFOPush
-                    | Opcode::Bind
-                    | Opcode::AsyncCall
-                  );
+                  let not_save_nodes =
+                    matches!(opcode, Opcode::FIFOPush | Opcode::Bind | Opcode::AsyncCall);
                   if !not_save_nodes {
                     if expr.get_opcode() == Opcode::Slice {
                       let oprend_key = expr.get_operand_value(0).unwrap().get_key();
@@ -638,11 +635,19 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys> {
       }
     }
     if expr.get_opcode() == Opcode::FIFOPush || is_output {
-      self.graph.submodule_image.caller_expr.insert(expr.get_key(), expr.elem);
+      self
+        .graph
+        .submodule_image
+        .caller_expr
+        .insert(expr.get_key(), expr.elem);
     }
 
     if is_barrier {
-      self.graph.submodule_image.barrier_expr.insert(expr.get_key(), expr.elem);
+      self
+        .graph
+        .submodule_image
+        .barrier_expr
+        .insert(expr.get_key(), expr.elem);
     }
 
     if is_condition {
@@ -658,11 +663,11 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys> {
       println!("expr_hashmap_insert: {:?}", expr.get_key());
       println!("opcode: {:?}", expr.get_opcode());
 
-      if matches!(expr.get_opcode() , Opcode::Load|Opcode::FIFOPop) {
+      if matches!(expr.get_opcode(), Opcode::Load | Opcode::FIFOPop) {
         self.graph.module_ports.push(expr.get_key());
       }
 
-      if matches!(expr.get_opcode() , Opcode::FIFOPush|Opcode::Store) {
+      if matches!(expr.get_opcode(), Opcode::FIFOPush | Opcode::Store) {
         //if let Some(DataType::UInt(_)) = operand_ref.get_value().get_dtype(self.sys) {} else
         {
           self
@@ -694,7 +699,11 @@ impl<'sys> Visitor<()> for GraphVisitor<'sys> {
   }
   fn visit_block(&mut self, block: BlockRef<'_>) -> Option<()> {
     println!("Block: {:?}", block.get_key());
-    self.graph.submodule_image.block_map.insert(block.get_key(), block.elem);
+    self
+      .graph
+      .submodule_image
+      .block_map
+      .insert(block.get_key(), block.elem);
     for elem in block.body_iter() {
       println!("elem: {:?}", elem.get_key());
       if let Some(x) = self.dispatch(block.sys, &elem, vec![]) {
@@ -753,7 +762,8 @@ impl<'a> CutModules<'a> {
       let mut local_bypass_map: HashMap<usize, BaseNode> = HashMap::new();
 
       // we must make sure the order of the submodule is correct
-      let mut sub_module_order_rev: Vec<_> = container.sub_module_image.sub_module_order.iter().collect();
+      let mut sub_module_order_rev: Vec<_> =
+        container.sub_module_image.sub_module_order.iter().collect();
       sub_module_order_rev.sort_by_key(|(k, _)| *k);
 
       //remove the barrier expr
@@ -866,9 +876,13 @@ impl<'a> CutModules<'a> {
             //order == 1,use original module as the caller
             let original_module = self.sys.get_module(original_module_name).unwrap();
             self.sys.set_current_module(original_module.elem);
-            self
-              .sys
-              .set_current_block(*container.sub_module_image.block_map.get(&submodule.buffered_block).unwrap());
+            self.sys.set_current_block(
+              *container
+                .sub_module_image
+                .block_map
+                .get(&submodule.buffered_block)
+                .unwrap(),
+            );
           }
           let bind_init = self.sys.get_init_bind(new_module);
 
@@ -983,15 +997,10 @@ impl<'a> CutModules<'a> {
               let mut new_expr_handle: Option<BaseNode> = None;
               // copy expr to new module
               match opcode {
-                Opcode::Binary { .. } =>  {
-
+                Opcode::Binary { .. } => {
                   let bin = expr.as_sub::<instructions::Binary>().unwrap();
-                  let a = *node_remapping_map
-                    .get(&bin.a().get_key())
-                    .unwrap();
-                  let b = *node_remapping_map
-                    .get(&bin.b().get_key())
-                    .unwrap();
+                  let a = *node_remapping_map.get(&bin.a().get_key()).unwrap();
+                  let b = *node_remapping_map.get(&bin.b().get_key()).unwrap();
                   let new_expr = match bin.get_opcode() {
                     Binary::Add => self.sys.create_add(a, b),
                     Binary::Sub => self.sys.create_sub(a, b),
@@ -1002,11 +1011,10 @@ impl<'a> CutModules<'a> {
                     Binary::Shl => self.sys.create_shl(a, b),
                     Binary::Shr => self.sys.create_shr(a, b),
                     Binary::Mod => self.sys.create_mod(a, b),
-
                   };
 
                   new_expr_handle = Some(new_expr);
-                },
+                }
                 Opcode::Cast { cast } => {
                   if cast == expr::subcode::Cast::BitCast {
                     //#TODO need to support the data type
@@ -1052,26 +1060,21 @@ impl<'a> CutModules<'a> {
                     }
                   }
                 }
-                Opcode::Compare { .. } =>  {
+                Opcode::Compare { .. } => {
                   let cmp = expr.as_sub::<instructions::Compare>().unwrap();
-                  let a = *node_remapping_map
-                    .get(&cmp.a().get_key())
-                    .unwrap();
-                  let b = *node_remapping_map
-                    .get(&cmp.b().get_key())
-                    .unwrap();
+                  let a = *node_remapping_map.get(&cmp.a().get_key()).unwrap();
+                  let b = *node_remapping_map.get(&cmp.b().get_key()).unwrap();
                   let new_expr = match cmp.get_opcode() {
                     expr::subcode::Compare::IGT => self.sys.create_igt(a, b),
                     expr::subcode::Compare::IGE => self.sys.create_ige(a, b),
-                    expr::subcode::Compare::EQ  => self.sys.create_eq(a, b),
+                    expr::subcode::Compare::EQ => self.sys.create_eq(a, b),
                     expr::subcode::Compare::ILE => self.sys.create_ile(a, b),
                     expr::subcode::Compare::ILT => self.sys.create_ilt(a, b),
-                    expr::subcode::Compare::NEQ  => self.sys.create_neq(a, b),
+                    expr::subcode::Compare::NEQ => self.sys.create_neq(a, b),
                   };
 
                   new_expr_handle = Some(new_expr);
-                  
-                },
+                }
                 _ => {
                   println!("-------{:?}   is not supported", opcode);
                 }
@@ -1084,7 +1087,9 @@ impl<'a> CutModules<'a> {
                 {
                   //#TODO need to think about the case that the child is also a block
                   //create new block and move the current expr to the new block
-                  if let Some(block_intrinsic) = container.sub_module_image.block_expr.get(&parent_key) {
+                  if let Some(block_intrinsic) =
+                    container.sub_module_image.block_expr.get(&parent_key)
+                  {
                     let block_expr = block_intrinsic.as_ref::<Expr>(self.sys).unwrap();
                     let opcode = block_expr.get_opcode();
                     let cond = block_expr.get_operand_value(0).unwrap().get_key();
