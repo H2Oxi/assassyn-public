@@ -68,9 +68,7 @@ class Driver(Module):
             adder.async_called(a = cnt_div2, b = cnt_div2 , c = cnt_div2)
 
 
-
-
-def test_block_barrier(is_gold):
+def impl(is_gold):
     if is_gold:
         sys = SysBuilder('Comb_block_barrier_gold')
     else :
@@ -98,8 +96,14 @@ def test_block_barrier(is_gold):
 
     raw = utils.run_simulator(simulator_path)
 
+def test_block_barrier():
+    impl(False)
 
+def test_block_barrier_gold():
+    impl(True)
 
 if __name__ == '__main__':
-    test_block_barrier(True)
-    test_block_barrier(False)
+    test_block_barrier()
+    test_block_barrier_gold()
+
+

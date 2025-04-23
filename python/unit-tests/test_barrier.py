@@ -84,7 +84,7 @@ class Driver(Module):
 
 
 
-def test_barrier(is_gold):
+def impl(is_gold):
     if is_gold:
         sys = SysBuilder('Comb_barrier_gold')
     else:
@@ -106,8 +106,12 @@ def test_barrier(is_gold):
     simulator_path, verilator_path  = elaborate(sys, **config)
     raw = utils.run_simulator(simulator_path)
 
+def test_barrier():
+    impl(False)
 
+def test_barrier_gold():
+    impl(True)
 
 if __name__ == '__main__':
-    test_barrier(True)#gold
-    test_barrier(False)
+    test_barrier()
+    test_barrier_gold()
