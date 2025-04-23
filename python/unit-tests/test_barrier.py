@@ -35,14 +35,18 @@ class Adder1(Module):
         )
 
     @module.combinational
-    def build(self,adder: Adder2):
+    def build(self,adder: Adder2,is_gold = False):
         a, b , c= self.pop_all_ports(True)
         e = a * b
-        barrier(e)
+        if is_gold:
+            barrier(e)
+        
         d = a + b + e
         h = d + Int(32)(1)
         g = h * h
-        barrier(g)
+        if is_gold:
+            barrier(g)
+        
         f = g * c        
 
         adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
@@ -80,32 +84,30 @@ class Driver(Module):
 
 
 
-def test_barrier():
-    sys = SysBuilder('Comb_barrier')
+def test_barrier(is_gold):
+    if is_gold:
+        sys = SysBuilder('Comb_barrier_gold')
+    else:
+        sys = SysBuilder('Comb_barrier')
     with sys:
         adder2 = Adder2()
         res = adder2.build()
-
         adder1 = Adder1()
-        d = adder1.build(adder2)
-
+        d = adder1.build(adder2,is_gold)
         driver = Driver()
         driver.build(adder1)
-
     print(sys)
-
     config = assassyn.backend.config(
             verilog=utils.has_verilator(),
             sim_threshold=200,
             idle_threshold=200,
             random=True)
 
-    #simulator_path, verilator_path = elaborate(sys, **config)
     simulator_path, verilator_path  = elaborate(sys, **config)
-
     raw = utils.run_simulator(simulator_path)
 
 
 
 if __name__ == '__main__':
-    test_barrier()
+    test_barrier(True)#gold
+    test_barrier(False)

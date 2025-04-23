@@ -744,7 +744,7 @@ impl<'a> CutModules<'a> {
     }
   }
 
-  //#TODO add the check for the expr is valid for remapping
+  //#TODO(@derui) add the check for the expr is valid for remapping
   pub fn is_expr_valid(&self, node_map: &HashMap<usize, BaseNode>, expr: &ExprRef) -> bool {
     true
   }
@@ -768,7 +768,7 @@ impl<'a> CutModules<'a> {
 
       //remove the barrier expr
       for (key, basenode) in container.sub_module_image.barrier_expr.iter() {
-        //#TODO need to do remove here
+        //#TODO(@derui) need to do remove here
         basenode
           .as_mut::<Expr>(self.sys)
           .unwrap()
@@ -801,7 +801,7 @@ impl<'a> CutModules<'a> {
             .buffered_ports
             .iter()
             .map(|port_id| {
-              //#TODO support change the data type
+              //#TODO(@derui) support change the data type
               PortInfo::new(
                 &format!("buffered_{}", port_id),
                 port_type_map.get(port_id).unwrap().clone(),
@@ -953,7 +953,7 @@ impl<'a> CutModules<'a> {
                   bind_node_parent_map
                     .insert(node_id, expr.get_parent(self.sys).unwrap().get_key());
                 } else if expr_bind.get_opcode() == Opcode::Bind {
-                  //#TODO here we assumed only one module was caller as long as having barrier
+                  //#TODO(@derui) here we assumed only one module was caller as long as having barrier
                   for (callee, caller) in module_with_multi_caller.iter() {
                     if caller.contains(expr) {
                       println!("callee: {:?}, caller: {:?}", callee, caller);
@@ -1001,23 +1001,16 @@ impl<'a> CutModules<'a> {
                   let bin = expr.as_sub::<instructions::Binary>().unwrap();
                   let a = *node_remapping_map.get(&bin.a().get_key()).unwrap();
                   let b = *node_remapping_map.get(&bin.b().get_key()).unwrap();
-                  let new_expr = match bin.get_opcode() {
-                    Binary::Add => self.sys.create_add(a, b),
-                    Binary::Sub => self.sys.create_sub(a, b),
-                    Binary::Mul => self.sys.create_mul(a, b),
-                    Binary::BitwiseAnd => self.sys.create_bitwise_and(a, b),
-                    Binary::BitwiseOr => self.sys.create_bitwise_or(a, b),
-                    Binary::BitwiseXor => self.sys.create_bitwise_xor(a, b),
-                    Binary::Shl => self.sys.create_shl(a, b),
-                    Binary::Shr => self.sys.create_shr(a, b),
-                    Binary::Mod => self.sys.create_mod(a, b),
-                  };
-
+                  let new_expr = self.sys.create_binary_op(
+                    a,
+                    b,
+                    opcode,
+                  );
                   new_expr_handle = Some(new_expr);
                 }
                 Opcode::Cast { cast } => {
                   if cast == expr::subcode::Cast::BitCast {
-                    //#TODO need to support the data type
+                    //#TODO(@derui) need to support the data type
                     let new_expr = self.sys.create_bitcast(
                       *node_remapping_map
                         .get(&expr.get_operand_value(0).as_ref().unwrap().get_key())
@@ -1064,15 +1057,11 @@ impl<'a> CutModules<'a> {
                   let cmp = expr.as_sub::<instructions::Compare>().unwrap();
                   let a = *node_remapping_map.get(&cmp.a().get_key()).unwrap();
                   let b = *node_remapping_map.get(&cmp.b().get_key()).unwrap();
-                  let new_expr = match cmp.get_opcode() {
-                    expr::subcode::Compare::IGT => self.sys.create_igt(a, b),
-                    expr::subcode::Compare::IGE => self.sys.create_ige(a, b),
-                    expr::subcode::Compare::EQ => self.sys.create_eq(a, b),
-                    expr::subcode::Compare::ILE => self.sys.create_ile(a, b),
-                    expr::subcode::Compare::ILT => self.sys.create_ilt(a, b),
-                    expr::subcode::Compare::NEQ => self.sys.create_neq(a, b),
-                  };
-
+                  let new_expr = self.sys.create_binary_op(
+                    a,
+                    b,
+                    opcode,
+                  );
                   new_expr_handle = Some(new_expr);
                 }
                 _ => {
@@ -1085,7 +1074,7 @@ impl<'a> CutModules<'a> {
                 if let std::collections::hash_map::Entry::Vacant(e) =
                   block_remapping_map.entry(parent_key)
                 {
-                  //#TODO need to think about the case that the child is also a block
+                  //#TODO(@derui) need to think about the case that the child is also a block
                   //create new block and move the current expr to the new block
                   if let Some(block_intrinsic) =
                     container.sub_module_image.block_expr.get(&parent_key)
@@ -1115,7 +1104,7 @@ impl<'a> CutModules<'a> {
                 }
               } else {
 
-                //#TODO need to add the support for the root block remapping
+                //#TODO(@derui) need to add the support for the root block remapping
               }
 
               if let Some(new_expr) = new_expr_handle {
@@ -1131,7 +1120,7 @@ impl<'a> CutModules<'a> {
                 node_remapping_map.insert(*child_key, new_expr);
                 println!("insert_new_expr: {:?} with origin key: {:?}", new_expr, *child_key);
                 //remove the original expr
-                //#TODO need to be more careful here
+                //#TODO(@derui) need to be more careful here
                 println!("base_node parents: {:?}", base_node.get_parent(self.sys));
                 println!("nodes_to_remove.push : {:?}", base_node);
 

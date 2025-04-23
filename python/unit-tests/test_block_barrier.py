@@ -23,7 +23,6 @@ class Adder2(Module):
 
         return d
 
-# Condition 2: The barrier is inside the conditional block
 class Adder1(Module):
 
     def __init__(self):
@@ -36,41 +35,17 @@ class Adder1(Module):
         )
 
     @module.combinational
-    def build(self,adder: Adder2):
+    def build(self,adder: Adder2,is_gold = False):
         a, b , c= self.pop_all_ports(True)
         e = a * b
         with Condition(e < Int(64)(100)):
             d = a + b + e
-            barrier(d)
+            if not is_gold:
+                barrier(d)
             f = d * c        
             adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
 
         return f
-
-# condition 1: barrier is outside the condition block
-'''class Adder1(Module):
-
-    def __init__(self):
-        super().__init__(
-            ports={
-                'a': Port(Int(32)),
-                'b': Port(Int(32)),
-                'c': Port(Int(32)),
-            },
-        )
-
-    @module.combinational
-    def build(self,adder: Adder2):
-        a, b , c= self.pop_all_ports(True)
-        e = a * b
-        barrier(e)
-        d = a + b + e
-        with Condition(d.bitcast(Int(32)) < Int(32)(100)):
-            f = d * c        
-            adder.async_called(a = f[0:31].bitcast(Int(32)), b = d[0:31].bitcast(Int(32)))
-
-        return f'''
-
 
 
 class Driver(Module):
@@ -80,14 +55,7 @@ class Driver(Module):
 
     @module.combinational
     def build(self, adder: Adder1):
-        # The code below is equivalent
-        # cnt = RegArray(Int(32), 0)
-        # v = cnt[0]
-        # cnt[0] = v + Int(32)(1)
-        # NOTE: cnt[0]'s new value is NOT visible until next cycle.
-        # cond = v < Int(32)(100)
-        # with Condition(cond):
-        #     adder.async_called(a = v, b = v)
+
         cnt = RegArray(Int(32), 1)
         cnt[0] = cnt[0] + Int(32)(1)
         cnt_div2_temp = cnt[0] + Int(32)(1)
@@ -102,14 +70,17 @@ class Driver(Module):
 
 
 
-def test_async_call():
-    sys = SysBuilder('Comb_block_barrier')
+def test_block_barrier(is_gold):
+    if is_gold:
+        sys = SysBuilder('Comb_block_barrier_gold')
+    else :
+        sys = SysBuilder('Comb_block_barrier')
     with sys:
         adder2 = Adder2()
         res = adder2.build()
 
         adder1 = Adder1()
-        d = adder1.build(adder2)
+        d = adder1.build(adder2, is_gold)
 
         driver = Driver()
         driver.build(adder1)
@@ -130,4 +101,5 @@ def test_async_call():
 
 
 if __name__ == '__main__':
-    test_async_call()
+    test_block_barrier(True)
+    test_block_barrier(False)
