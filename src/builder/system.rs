@@ -516,8 +516,8 @@ impl SysBuilder {
 
   pub fn create_binary_op(&mut self, a: BaseNode, b: BaseNode, opcode: Opcode) -> BaseNode {
     match self.combine_types(opcode, &a, &b) {
-        Ok(res_ty) => self.create_expr(res_ty, opcode, vec![a, b], true),
-        Err(msg) => panic!("{}", msg),
+      Ok(res_ty) => self.create_expr(res_ty, opcode, vec![a, b], true),
+      Err(msg) => panic!("{}", msg),
     }
   }
 

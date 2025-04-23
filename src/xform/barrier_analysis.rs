@@ -1001,11 +1001,7 @@ impl<'a> CutModules<'a> {
                   let bin = expr.as_sub::<instructions::Binary>().unwrap();
                   let a = *node_remapping_map.get(&bin.a().get_key()).unwrap();
                   let b = *node_remapping_map.get(&bin.b().get_key()).unwrap();
-                  let new_expr = self.sys.create_binary_op(
-                    a,
-                    b,
-                    opcode,
-                  );
+                  let new_expr = self.sys.create_binary_op(a, b, opcode);
                   new_expr_handle = Some(new_expr);
                 }
                 Opcode::Cast { cast } => {
@@ -1057,11 +1053,7 @@ impl<'a> CutModules<'a> {
                   let cmp = expr.as_sub::<instructions::Compare>().unwrap();
                   let a = *node_remapping_map.get(&cmp.a().get_key()).unwrap();
                   let b = *node_remapping_map.get(&cmp.b().get_key()).unwrap();
-                  let new_expr = self.sys.create_binary_op(
-                    a,
-                    b,
-                    opcode,
-                  );
+                  let new_expr = self.sys.create_binary_op(a, b, opcode);
                   new_expr_handle = Some(new_expr);
                 }
                 _ => {
