@@ -8,7 +8,8 @@ INTRIN_INFO = {
     # Intrinsic operations opcode: (mnemonic, num of args, valued, side effect)
     900: ('wait_until', 1, False, True),
     901: ('finish', 0, False, True),
-    902: ('assert', 1, False, True)
+    902: ('assert', 1, False, True),
+    903: ('barrier', 1, False, True),
 }
 
 class Intrinsic(Expr):
@@ -17,6 +18,7 @@ class Intrinsic(Expr):
     WAIT_UNTIL = 900
     FINISH = 901
     ASSERT = 902
+    BARRIER = 903
 
     def __init__(self, opcode, *args):
         super().__init__(opcode)
@@ -66,3 +68,8 @@ def is_wait_until(expr):
 def finish():
     '''Finish the simulation.'''
     return Intrinsic(Intrinsic.FINISH)
+
+@ir_builder
+def barrier(node):
+    '''Barrier the current simulation state.'''
+    return Intrinsic(Intrinsic.BARRIER, node)

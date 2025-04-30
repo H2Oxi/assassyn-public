@@ -10,6 +10,8 @@ import shutil
 from assassyn.frontend import *
 from assassyn.backend import *
 from assassyn import utils
+from assassyn.module import fsm
+
 
 N_SIZE = 494
 L_SIZE = 10
@@ -24,13 +26,13 @@ OUT_BASE = M_SIZE + M_SIZE + N_SIZE
 
 class SRAM_USER:
     IDLE = Bits(3)(0)
-    WAIT = Bits(3)(7)
     M1 =   Bits(3)(1)
     M2 =   Bits(3)(2)
     M3 =   Bits(3)(3)
     OUT =  Bits(3)(4)
     JUMP = Bits(3)(5)
     OUT_WAIT = Bits(3)(6)
+    WAIT = Bits(3)(7)
 
 
 class Memuser(Module):
@@ -89,49 +91,46 @@ class SRAM_Master(Module):
         nzval_reg_addr = p + Int(32)(NZVAL_BASE)
         vec_reg_addr = cols_reg[0] + Int(32)(VEC_BASE)
         out_addr = p + Int(32)(OUT_BASE)
-        
 
-        address_wire = (user_state[0] == SRAM_USER.WAIT).select( cols_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)), address_wire)
-        address_wire = (user_state[0] == SRAM_USER.M1).select( nzval_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)), address_wire)
-        address_wire = (user_state[0] == SRAM_USER.M2).select( vec_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)), address_wire)
-        address_wire = (user_state[0] == SRAM_USER.OUT).select( out_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)), address_wire)
+        start_fsm = Start == Bits(1)(1)
+        default = Bits(1)(1)
+        j_max = j[0]==Int(32)(J_MAX)
 
-        with Condition((user_state[0] == SRAM_USER.M1)|(user_state[0] == SRAM_USER.M2)|(user_state[0] == SRAM_USER.M3)|(user_state[0] == SRAM_USER.WAIT)):
-            with Condition(user_state[0] == SRAM_USER.M1):
-                user_state[0] = SRAM_USER.M2
-
-            with Condition(user_state[0] == SRAM_USER.M2):
-                user_state[0] = SRAM_USER.M3
-
-            with Condition(user_state[0] == SRAM_USER.M3):
-                user_state[0] = (j[0]==Int(32)(J_MAX)).select(  SRAM_USER.OUT, SRAM_USER.JUMP)
-                
-
-            with Condition(user_state[0] == SRAM_USER.WAIT):
-                with Condition(Start == Bits(1)(1)):
-                    user_state[0] = SRAM_USER.M1
-                
-
-        with Condition(user_state[0] == SRAM_USER.IDLE):
-            with Condition(Start == Bits(1)(1)):
-                user_state[0] = SRAM_USER.WAIT
-
-        with Condition(user_state[0] == SRAM_USER.OUT):
-            user_state[0] = SRAM_USER.OUT_WAIT
+        t_table = {
+            "idle": {start_fsm: "wait"},
+            "m1": {default:"m2"},
+            "m2": {default: "m3"},
+            "m3": {j_max: "out", ~j_max: "jump"},
+            "out": {default: "out_wait"},
+            "jump": {default: "wait"},
+            "out_wait": {default: "wait"},
+            "wait": {start_fsm: "m1"},
+        }
+        my_fsm = fsm.FSM(user_state, t_table)
+        def out_body():
             sum[0] = sum[0] + nzval_reg[0][0:15].bitcast(Int(16)) * vec_reg[0][0:15].bitcast(Int(16))
-            
-        with Condition(user_state[0] == SRAM_USER.JUMP):
-            user_state[0] = SRAM_USER.WAIT
+        def jump_body():
             sum[0] = sum[0] + nzval_reg[0][0:15].bitcast(Int(16)) * vec_reg[0][0:15].bitcast(Int(16))
             log("sum: {} = nzval_reg[0] * vec_reg[0] = {} * {}", sum[0], nzval_reg[0][0:15].bitcast(Int(16)), vec_reg[0][0:15].bitcast(Int(16)))
-        
-        with Condition(user_state[0] == SRAM_USER.OUT_WAIT):
-            user_state[0] = SRAM_USER.WAIT
+        def out_wait_body():
             out[0] = sum[0]
             sum[0] = Int(32)(0)
             log("sum-clear: {} = 0", sum[0])
+        reg_body_table = {
+            "out": out_body,
+            "jump": jump_body,
+            "out_wait": out_wait_body,
+        }
+        mux_table = {
+            address_wire: {
+            "wait": cols_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)),
+            "m1"  : nzval_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)),
+            "m2"  : vec_reg_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)),
+            "out" : out_addr[0:ADDR_WIDTH-1].bitcast(Bits(ADDR_WIDTH)),
+            }
+        }
 
-        
+        my_fsm.generate(reg_body_table,mux_table)
 
 
         sram = SRAM(32, 2**ADDR_WIDTH , init_file)
@@ -167,12 +166,12 @@ class External_loop(Module):
             i[0] = con.select((i[0].bitcast(Int(32)) + Int(32)(1)) , Int(32)(0))
         
         log("outterloop----------In_full_flag: {} | i: {} |Stop-signal: {}", In_full_flag,i[0],full_flag[0])
-
+        
         finish_flag = In_full_flag & (i[0] == Int(32)(I_MAX)) & (~ full_flag[0])
         with Condition(finish_flag):
-            log("finish")
-            finish()
-
+             log("finish")
+             finish()
+        
         sram_master.async_called(Start = ~full_flag[0])
 
         
@@ -214,7 +213,7 @@ class Driver(Module):
         
 
 def test_spmv():
-    sys =  SysBuilder('spmv')
+    sys =  SysBuilder('spmv_fsm')
     init_file = 'ellpack_data_reformatted.data'
     with sys:
         i = RegArray(Int(32), 1)

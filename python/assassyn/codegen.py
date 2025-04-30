@@ -66,6 +66,7 @@ CG_OPCODE = {
     expr.intrinsic.Intrinsic.WAIT_UNTIL: 'wait_until',
     expr.intrinsic.Intrinsic.FINISH: 'finish',
     expr.intrinsic.Intrinsic.ASSERT: 'assert',
+    expr.intrinsic.Intrinsic.BARRIER: 'barrier',
 }
 
 CG_MIDFIX = {
@@ -211,6 +212,11 @@ class CodeGen(visitor.Visitor):
         self.header.append('use std::collections::HashMap;')
         self.header.append('use assassyn::builder::SysBuilder;')
         self.header.append('use assassyn::ir::node::IsElement;')
+        self.header.append('use assassyn::ir::visitor::Visitor;')
+        self.header.append(
+    'use assassyn::xform::barrier_analysis::{GatherModulesToCut,'
+    'CutModules};'
+)
         self.code.append('fn main() {')
         self.code.append(f'  let mut sys = SysBuilder::new(\"{node.name}\");')
         self.code.append(
@@ -264,6 +270,15 @@ class CodeGen(visitor.Visitor):
                ..Default::default()
             }};
         ''')
+        self.code.append('  println!("{}", sys);')
+        self.code.append('  let submodule_container_map = {')
+        self.code.append('    let mut barrier_visitor = GatherModulesToCut::new(&sys);')
+        self.code.append('    barrier_visitor.enter(&sys);')
+        self.code.append('    barrier_visitor.submodule_container_map().clone()  };')
+        self.code.append('  let mut module_cut = CutModules::new(&mut sys);')
+        self.code.append('  module_cut.set_submodule_container_map( submodule_container_map );')
+        self.code.append('  module_cut.print_submodules();')
+        self.code.append('  module_cut.cut_modules();')
         self.code.append('  println!("{}", sys);')
         config = 'assassyn::xform::Config{ rewrite_wait_until: true }'
         self.code.append(f'  assassyn::xform::basic(&mut sys, &{config});')
@@ -393,6 +408,10 @@ class CodeGen(visitor.Visitor):
                 res = f'sys.{ib_method}({cond});'
             elif node.opcode == expr.Intrinsic.FINISH:
                 res = f'sys.{ib_method}();'
+            elif node.opcode == expr.Intrinsic.BARRIER:
+                barrier_node = self.generate_rval(node.args[0])
+                res = f'sys.{ib_method}({barrier_node});'
+
             else:
                 length = len(repr(node)) - 1
                 res = f'  // ^{"~" * length}: Support the instruction above'
