@@ -141,6 +141,17 @@ class EmitBinds(visitor.Visitor):
 class CodeGen(visitor.Visitor):
     '''Generate the assassyn IR builder for the given system'''
 
+    code: list  # List of code lines to be generated
+    header: list  # List of header lines to be generated
+    emitted_bind: set  # Set of emitted binds
+    targets: dict  # Target backends for code generation
+    resource_base: str  # Base directory for resources
+    idle_threshold: int  # Idle threshold parameter
+    sim_threshold: int  # Simulation threshold parameter
+    random: bool  # Random parameter
+    default_fifo_depth: int  # Default FIFO depth
+    fifo_depths: dict  # Dictionary of FIFO depths
+
     def emit_module_attrs(self, m: Module, var_id: str):
         '''Generate module attributes.'''
         module_mut = f'{var_id}.as_mut::<assassyn::ir::Module>(&mut sys).unwrap()'

@@ -1,10 +1,23 @@
 '''The module for the block AST node related implementations.'''
 
+from __future__ import annotations
+
+import typing
+
 from .builder import ir_builder, Singleton
 from .utils import identifierize
 
+if typing.TYPE_CHECKING:
+    from .module.base import ModuleBase
+    from .value import Value
+    from .expr import Expr
+
 class Block:
     '''The base node of a block.'''
+
+    kind: int  # Kind of block
+    _body: list[Expr]  # List of instructions in the block
+    parent: typing.Union[typing.Self, ModuleBase]  # Parent block
 
     MODULE_ROOT = 0
     CONDITIONAL = 1
@@ -57,6 +70,8 @@ class Block:
 class CondBlock(Block):
     '''The inherited class of the block for conditional block.'''
 
+    cond: Value  # Condition for this block
+
     def __init__(self, cond):
         super().__init__(Block.CONDITIONAL)
         self.cond = cond
@@ -70,6 +85,8 @@ class CondBlock(Block):
 
 class CycledBlock(Block):
     '''The inherited class of the block for cycled block used for testbench generation.'''
+
+    cycle: int  # Cycle count for this block
 
     def __init__(self, cycle: int):
         super().__init__(Block.CYCLE)

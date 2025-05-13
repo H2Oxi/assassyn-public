@@ -1,10 +1,17 @@
 '''The module provides the Array class for representing register arrays in the IR.'''
 
+from __future__ import annotations
+
+import typing
+
 from .builder import ir_builder, Singleton
-from .dtype import DType, to_uint, RecordValue
+from .dtype import to_uint, RecordValue
 from .expr import ArrayRead, ArrayWrite
 from .value import Value
 from .utils import identifierize
+
+if typing.TYPE_CHECKING:
+    from .dtype import DType
 
 def RegArray( #pylint: disable=invalid-name
         scalar_ty: DType,
@@ -32,6 +39,12 @@ def RegArray( #pylint: disable=invalid-name
 class Array:
     '''The class represents a register array in the AST IR.'''
 
+    scalar_ty: DType  # Data type of each element in the array
+    size: int  # Size of the array
+    attr: list  # List of attributes for this array
+    initializer: list  # Initial values for the array elements
+    _name: str  # Internal name storage
+
     FULLY_PARTITIONED = 1
 
     def as_operand(self):
@@ -49,6 +62,8 @@ class Array:
         self._name = name
 
     def __init__(self, scalar_ty: DType, size: int, attr: list, initializer: list):
+        #pylint: disable=import-outside-toplevel
+        from .dtype import DType
         assert isinstance(scalar_ty, DType)
         self.scalar_ty = scalar_ty
         self.size = size
