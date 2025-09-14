@@ -203,6 +203,8 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             cond_str = self.dump_rval(node.cond, False)
             self.cond_stack.append((f"({cond_str})", node))
             def has_side_effect(block: Block) -> bool:
+                if block.body is None:
+                    return False
                 for item in block.body:
                     if isinstance(item, Log):
                         return True
@@ -216,16 +218,17 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         elif is_cycle:
             self.cond_stack.append((f"(self.cycle_count == {node.cycle})", node))
 
-        for i in node.body:
-            if isinstance(i, Expr):
-                self.visit_expr(i)
-            elif isinstance(i, Block):
-                self.visit_block(i)
-            elif isinstance(i, RecordValue):
-                pass
-            else:
-                print(i)
-                raise ValueError(f'Unknown node type: {type(i)}')
+        if node is not None and node.body is not None:
+            for i in node.body:
+                if isinstance(i, Expr):
+                    self.visit_expr(i)
+                elif isinstance(i, Block):
+                    self.visit_block(i)
+                elif isinstance(i, RecordValue):
+                    pass
+                else:
+                    print(i)
+                    raise ValueError(f'Unknown node type: {type(i)}')
 
         if is_cond or is_cycle:
             self.cond_stack.pop()
@@ -968,6 +971,10 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
     def _walk_expressions(self, block: Block):
         """Recursively walks a block and yields all expressions."""
+        if block is None:
+            return
+        if block.body is None:
+            return
         for item in block.body:
             if isinstance(item, Expr):
                 yield item

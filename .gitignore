@@ -4,7 +4,7 @@ target
 examples/*/__pycache__/
 /.vscode
 *.log
-
+.note/*
 testbench/simulator/ext
 testbench/simulator/build
 
