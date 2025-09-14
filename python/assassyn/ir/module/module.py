@@ -41,11 +41,13 @@ class Module(ModuleBase):
     ATTR_DISABLE_ARBITER = 1
     ATTR_TIMING = 2
     ATTR_MEMORY = 3
+    ATTR_EXTERNAL = 4
 
     MODULE_ATTR_STR = {
       ATTR_DISABLE_ARBITER: 'no_arbiter',
       ATTR_MEMORY: 'memory',
       ATTR_TIMING: 'timing',
+      ATTR_EXTERNAL: 'external',
     }
 
     def __init__(self, ports, no_arbiter=False):
@@ -226,3 +228,77 @@ def combinational(
         res = func(*args, **kwargs)
     Singleton.builder.exit_context_of('module')
     return res
+
+
+class Wire:
+    '''A wire for connecting to external modules.'''
+    
+    def __init__(self, dtype, direction=None):
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import DType
+        if dtype is not None:
+            assert isinstance(dtype, DType)
+        self.dtype = dtype
+        self.direction = direction  # 'input', 'output', or None (undirected)
+        self.value = None  # Assigned value for input wires
+        
+    def __repr__(self):
+        dir_str = f", {self.direction}" if self.direction else ""
+        return f'Wire<{self.dtype}{dir_str}>'
+        
+    def assign(self, value):
+        '''Assign a value to this wire (for input wires).'''
+        if self.direction == 'output':
+            raise ValueError("Cannot assign to output wire")
+        self.value = value
+        
+    def get_value(self):
+        '''Get the assigned value (for input wires) or the wire itself (for output wires).'''
+        if self.direction == 'input':
+            return self.value
+        return self  # For output wires, return the wire itself
+
+
+class WireDict:
+    '''A dictionary-like class for managing wires with assignment and access support.'''
+    
+    def __init__(self):
+        self._wires = {}
+        
+    def __setitem__(self, key, value):
+        '''Assign a value to a wire.'''
+        if key in self._wires:
+            # If wire already has a direction and it's output, this is an error
+            if self._wires[key].direction == 'output':
+                raise ValueError(f"Cannot assign to output wire '{key}'")
+            # If wire is undirected, set its direction to input
+            if self._wires[key].direction is None:
+                self._wires[key].direction = 'input'
+            self._wires[key].assign(value)
+        else:
+            # Create a new wire with input direction
+            from ..dtype import DType
+            if hasattr(value, 'dtype') and isinstance(value.dtype, DType):
+                self._wires[key] = Wire(value.dtype, 'input')
+                self._wires[key].assign(value)
+            else:
+                raise KeyError(f"Cannot create wire '{key}' - cannot infer type from value")
+            
+    def __getitem__(self, key):
+        '''Get a wire's value or the wire itself.'''
+        if key in self._wires:
+            # If this is the first time accessing this wire, set its direction to output
+            if self._wires[key].direction is None:
+                self._wires[key].direction = 'output'
+            return self._wires[key].get_value()
+        else:
+            # Create a new wire with output direction
+            self._wires[key] = Wire(None, 'output')  # Type will be determined later
+            return self._wires[key].get_value()
+            
+    def __contains__(self, key):
+        '''Check if a wire exists.'''
+        return key in self._wires
+        
+    def __repr__(self):
+        return f'WireDict({self._wires})'
