@@ -5,10 +5,13 @@ from .ir.array import RegArray, Array
 from .ir.dtype import DType, Int, UInt, Float, Bits, Record
 from .builder import SysBuilder, ir_builder, Singleton
 from .ir.expr import Expr, log, concat, finish, wait_until, assume, barrier, mem_read, mem_write
-from .ir.module import Module, Port, Downstream, fsm
+from .ir.module import Module, Port, Downstream, fsm, downstream_combinational
 from .ir.module.external import ExternalModule
 from .ir.module.sram import SRAM
 from .ir.block import Condition, Cycle
 from .ir import module
-from .ir.module import downstream
 from .ir.value import Value
+
+# Create a downstream module object with combinational attribute
+class downstream:
+    combinational = downstream_combinational
