@@ -66,10 +66,10 @@ class Adder(Downstream):
         b = b.optional(UInt(32)(1))
 
         # Instantiate the external adder module
-        #ext_adder.in_assign(a=a, b=b)
-        #c = ext_adder.out_wires['c']
+        ext_adder.in_assign(a=a, b=b)
+        c = ext_adder.out_wires['c']
 
-        log("downstream: {} + {} = ", a, b)
+        log("downstream: {} + {} = ", a, b, c)
 
 
 def test_easy_external():
@@ -90,7 +90,7 @@ def test_easy_external():
     print(sys)
 
     config = assassyn.backend.config(
-            verilog=utils.has_verilator(),
+            verilog=True,  # Force verilog generation
             simulator=False,
             sim_threshold=100,
             idle_threshold=100)

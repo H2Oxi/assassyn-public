@@ -3,7 +3,7 @@
 import os
 from .module import Module, WireDict
 from ...utils import namify
-from ..expr import wire_assign
+from ..expr import wire_assign, wire_read
 
 class ExternalModule(Module):
     '''An external module implemented in SystemVerilog.'''
@@ -38,11 +38,11 @@ class ExternalModule(Module):
             if ports is None:
                 ports = {}
             # Create wire dictionary for direct access
-            self.wires = WireDict()
+            self.wires = WireDict(self)
             from .module import Wire
             for name, dtype in wires.items():
                 # Create undirected wires initially, directions will be inferred from usage
-                self.wires._wires[name] = Wire(dtype)
+                self.wires._wires[name] = Wire(dtype, module=self)
                 # For backward compatibility, we still create ports
                 from .module import Port
                 ports[name] = Port(dtype)
@@ -51,14 +51,14 @@ class ExternalModule(Module):
             if ports is None:
                 ports = {}
             # Create wire dictionary for direct access
-            self.wires = WireDict()
+            self.wires = WireDict(self)
             from .module import Wire
             
             # Handle input wires
             if in_wires is not None:
                 for name, dtype in in_wires.items():
                     # Create input wires with explicit direction
-                    self.wires._wires[name] = Wire(dtype, 'input')
+                    self.wires._wires[name] = Wire(dtype, 'input', self)
                     # For backward compatibility, we still create ports
                     from .module import Port
                     ports[name] = Port(dtype)
@@ -80,7 +80,7 @@ class ExternalModule(Module):
                             from ...builder import Singleton
                             # Try to infer the dtype from the value
                             dtype = getattr(value, 'dtype', None) if value is not None else None
-                            wire_obj = Wire(dtype, 'input')
+                            wire_obj = Wire(dtype, 'input', self.ext_module)
                             self.ext_module.wires._wires[key] = wire_obj
                         elif wire_obj.direction == 'output':
                             raise ValueError(f"Cannot assign to output wire '{key}'")
@@ -90,6 +90,7 @@ class ExternalModule(Module):
                         
                         # For input wires, we want to assign the value to the wire
                         # wire_assign expects (wire, value) where wire is the wire being assigned to
+                        from ..expr import wire_assign
                         wire_assign(wire_obj, value)
                         self.ext_module.wires[key] = value
                 
@@ -99,7 +100,7 @@ class ExternalModule(Module):
             if out_wires is not None:
                 for name, dtype in out_wires.items():
                     # Create output wires with explicit direction
-                    self.wires._wires[name] = Wire(dtype, 'output')
+                    self.wires._wires[name] = Wire(dtype, 'output', self)
                     # For backward compatibility, we still create ports
                     from .module import Port
                     ports[name] = Port(dtype)
@@ -109,10 +110,19 @@ class ExternalModule(Module):
                         self.ext_module = ext_module
                     
                     def __getitem__(self, key):
+                        # Return the wire object itself for output wires
+                        # This ensures that expressions referencing output wires are tracked properly
+                        wire_obj = self.ext_module.wires._wires.get(key)
+                        if wire_obj is not None and wire_obj.direction == 'output':
+                            # Set the wire's name if not already set
+                            if wire_obj.name is None:
+                                wire_obj.name = key
+                            return wire_read(wire_obj)
                         return self.ext_module.wires[key]
                     
                     def __setitem__(self, key, value):
                         # Create a wire assignment expression
+                        from ..expr import wire_assign
                         wire_assign(self.ext_module.wires[key], value)
                         self.ext_module.wires[key] = value
                         
@@ -144,9 +154,9 @@ class ExternalModule(Module):
                     from ..expr import wire_assign
                     # Try to infer the dtype from the value
                     dtype = getattr(value, 'dtype', None) if value is not None else None
-                    wire_obj = Wire(dtype, 'input')
+                    wire_obj = Wire(dtype, 'input', self)
                     if not hasattr(self, 'wires'):
-                        self.wires = WireDict()
+                        self.wires = WireDict(self)
                     self.wires._wires[wire_name] = wire_obj
                     wire_assign(wire_obj, value)
                     self.wires[wire_name] = value
@@ -161,9 +171,23 @@ class ExternalModule(Module):
     def __getitem__(self, key):
         '''Allow access to wires using bracket notation.'''
         if hasattr(self, 'wires') and key in self.wires:
-            return self.wires[key].get_value()
+            value = self.wires[key]
+            wire_obj = self.wires._wires.get(key)
+            if wire_obj is not None and wire_obj.direction == 'output':
+                return wire_read(wire_obj)
+            return value
         else:
             raise KeyError(f"Wire '{key}' not found")
+        
+    def in_assign(self, **kwargs):
+        '''Assign values to input wires using keyword arguments.
+        
+        Args:
+            **kwargs: Wire name to value mappings (e.g., a=value, b=value)
+        '''
+        for wire_name, value in kwargs.items():
+            # Use the existing in_wires assignment mechanism
+            self.in_wires[wire_name] = value
         
     def __repr__(self):
         '''String representation of the external module.'''
