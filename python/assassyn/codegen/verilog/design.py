@@ -33,7 +33,8 @@ from ...ir.expr import (
     Bind,
     Select1Hot,
     Intrinsic,
-    WireAssign
+    WireAssign,
+    WireRead
 )
 
 
@@ -541,28 +542,34 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes
             else:
                 raise ValueError(f"Unknown block intrinsic: {expr}")
         elif isinstance(expr, WireAssign):
-            # Wire assignments are handled during module instantiation, not during expression evaluation
-            # We just need to expose the wire for external module connections
-            # However, for downstream modules with external modules, we need to generate
-            # the external module instantiation and connections
-            body = None
-            # For downstream modules, we need to track external module connections
-            # This will be handled in cleanup_post_generation
+            # Annotate external wire assigns so they show up in the generated script
+            body = f"# External wire assign: {expr}"
             if isinstance(self.current_module, Downstream):
-                # Track external module wire assignments for later processing
                 wire = expr.wire
                 value = expr.value
-                # Check if this is an assignment to an external module wire
-                if hasattr(wire, 'parent') and isinstance(wire.parent, ExternalModule):
-                    # This is an assignment to an external module wire
-                    # Track it for later processing in cleanup_post_generation
-                    self.external_wire_assignments.append((wire, value))
-                # Also track references to external module outputs for later processing
-                # Check if value refers to an external module output
+                owner = getattr(wire, 'parent', None)
+                if owner is None:
+                    owner = getattr(wire, 'module', None)
+                if isinstance(owner, ExternalModule):
+                    entry = (wire, value)
+                    if entry not in self.external_wire_assignments:
+                        self.external_wire_assignments.append(entry)
                 elif hasattr(value, 'parent') and isinstance(value.parent, ExternalModule):
-                    # This is a reference to an external module output
-                    # Track it for later processing in cleanup_post_generation
-                    self.external_wire_assignments.append((None, value))
+                    entry = (None, value)
+                    if entry not in self.external_wire_assignments:
+                        self.external_wire_assignments.append(entry)
+        elif isinstance(expr, WireRead):
+            # Document reads from external module outputs
+            body = f"# External wire read: {expr}"
+            if isinstance(self.current_module, Downstream):
+                wire = expr.wire
+                owner = getattr(wire, 'parent', None)
+                if owner is None:
+                    owner = getattr(wire, 'module', None)
+                if isinstance(owner, ExternalModule):
+                    entry = (None, wire)
+                    if entry not in self.external_wire_assignments:
+                        self.external_wire_assignments.append(entry)
         else:
             raise ValueError(f"Unhandled expression type: {type(expr).__name__}")
 
