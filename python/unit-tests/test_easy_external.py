@@ -69,7 +69,7 @@ class Adder(Downstream):
         ext_adder.in_assign(a=a, b=b)
         c = ext_adder.out_wires['c']
 
-        log("downstream: {} + {} = ", a, b, c)
+        log("downstream: {} + {} = {}", a, b, c)
 
 
 def test_easy_external():
