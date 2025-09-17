@@ -7,8 +7,9 @@ from .testbench import generate_testbench
 from .design import generate_design
 
 from ...builder import SysBuilder
+from ...ir.module.external import ExternalModule
 
-from ...utils import create_and_clean_dir
+from ...utils import create_and_clean_dir, repo_path
 
 def elaborate(sys: SysBuilder, **kwargs) -> str:
     """Elaborate the system into Verilog.
@@ -33,10 +34,17 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
 
     create_and_clean_dir(path)
 
+    external_sources = set()
+    for module in sys.modules:
+        if isinstance(module, ExternalModule) and getattr(module, 'file_path', None):
+            external_sources.add(module.file_path)
+
+    external_file_names = sorted({Path(file_name).name for file_name in external_sources})
+
     logs = generate_design(path / "design.py", sys)
 
 
-    generate_testbench(path / "tb.py", sys, kwargs['sim_threshold'], logs)
+    generate_testbench(path / "tb.py", sys, kwargs['sim_threshold'], logs, external_file_names)
 
 
     default_home = os.getenv('ASSASSYN_HOME', os.getcwd())
@@ -52,5 +60,17 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
             print(f"Copied {source_file} to {destination_file}")
         else:
             print(f"Warning: Resource file not found: {source_file}")
+
+    for file_name in external_sources:
+        src_path = Path(file_name)
+        if not src_path.is_absolute():
+            src_path = Path(repo_path()) / file_name
+
+        if src_path.is_file():
+            destination_file = path / src_path.name
+            shutil.copy(src_path, destination_file)
+            print(f"Copied {src_path} to {destination_file}")
+        else:
+            print(f"Warning: External resource file not found: {src_path}")
 
     return path
