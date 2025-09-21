@@ -8,7 +8,9 @@ from ..expr import wire_assign, wire_read
 class ExternalModule(Module):
     '''An external module implemented in SystemVerilog.'''
     
-    def __init__(self, file_path, ports=None, wires=None, in_wires=None, out_wires=None, module_name=None, no_arbiter=False, **wire_connections):
+    def __init__(self, file_path, ports=None, wires=None, in_wires=None, out_wires=None,
+                 module_name=None, no_arbiter=False, has_clock=False, has_reset=False,
+                 **wire_connections):
         '''Construct an external module.
         
         Args:
@@ -31,6 +33,8 @@ class ExternalModule(Module):
             self.file_path = file_path
             
         self.external_module_name = module_name or type(self).__name__
+        self.has_clock = has_clock
+        self.has_reset = has_reset
         
         # Handle wires parameter as alternative to ports
         if wires is not None:

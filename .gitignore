@@ -4,8 +4,8 @@ target
 examples/*/__pycache__/
 /.vscode
 *.log
-.note/*
+note/*
 testbench/simulator/ext
 testbench/simulator/build
-
+3rd-party/*
 **/.claude/settings.local.json
