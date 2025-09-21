@@ -69,7 +69,7 @@ def test_wait_until():
         sqr = Squarer()
         sqr.build()
 
-        lock = RegArray(UInt(1), 1)
+        lock = RegArray(Bits(1), 1)
 
         agent = Agent()
         agent.build(lock, sqr)
