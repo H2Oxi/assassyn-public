@@ -42,7 +42,7 @@ def runner():
         srcs = [path / i.strip() for i in f.readlines()]
     sram_blackbox_files = glob.glob('sram_blackbox_*.sv')
     srcs = srcs + sram_blackbox_files
-    srcs = srcs + ['fifo.sv', 'trigger_counter.sv'] + external_files
+    srcs = srcs + ['fifo.sv', 'trigger_counter.sv'{}]
     runner = get_runner(sim)
     runner.build(sources=srcs, hdl_toplevel='Top', always=True)
     runner.test(hdl_toplevel='Top', test_module='tb')
@@ -56,5 +56,5 @@ def generate_testbench(fname: str, sys: SysBuilder, sim_threshold: int,
     with open(fname, "w", encoding='utf-8') as f:
         dump_logger = '\n        '.join(dump_logger)
         extra_sources = ''.join(f", '{name}'" for name in external_files)
-        tb_dump = TEMPLATE.format(sim_threshold, dump_logger)
+        tb_dump = TEMPLATE.format(sim_threshold, dump_logger, extra_sources)
         f.write(tb_dump)

@@ -597,6 +597,10 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
                 self.append_code('# but here we manually write it out')
                 self.append_code('# instantiate external module')
                 connections = []
+                if getattr(owner, 'has_clock', False):
+                    connections.append('clk=self.clk')
+                if getattr(owner, 'has_reset', False):
+                    connections.append('rst=self.rst')
                 for input_name, input_val in self.pending_external_inputs.get(owner, []):
                     connections.append(f"{input_name}={self.dump_rval(input_val, False)}")
                 if connections:
@@ -604,6 +608,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
                 else:
                     self.append_code(f'{inst_name} = {ext_module_name}()')
                 self.instantiated_external_modules.add(owner)
+                self.pending_external_inputs.pop(owner, None)
 
             if owner is not None and wire_name is not None:
                 inst_name = f"{namify(owner.name).lower()}_inst"
@@ -1246,10 +1251,14 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         
         self.append_code(f'class {class_name}(Module):')
         self.indent += 4
-        
+
         # Set the module name for PyCDE
         self.append_code(f'module_name = f"{module_name}"')
-        
+        if getattr(ext_module, 'has_clock', False):
+            self.append_code('clk = Clock()')
+        if getattr(ext_module, 'has_reset', False):
+            self.append_code('rst = Reset()')
+
         # Check if the external module has wires attribute
         if hasattr(ext_module, 'wires') and hasattr(ext_module.wires, '_wires'):
             # Handle wires with explicit directions
@@ -1498,6 +1507,9 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         sorted_modules = topological_sort(all_modules, module_deps)
 
         for module in sorted_modules:
+            if isinstance(module, ExternalModule) or \
+               (hasattr(module, '_attrs') and Module.ATTR_EXTERNAL in module._attrs):
+                continue
             mod_name = namify(module.name)
             is_downstream = isinstance(module, Downstream)
             is_sram = isinstance(module, SRAM)
@@ -1605,17 +1617,25 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
                     f'mem_{array_name}_read_enable.assign(inst_{mod_name}.mem_read_enable)'
                     )
 
+            module_ports = getattr(module, 'ports', [])
+
             if not is_downstream:
                 self.append_code(
                     f"{mod_name}_trigger_counter_pop_ready.assign(inst_{mod_name}.executed)"
                     )
-                for port in module.ports:
+                for port in module_ports:
                     if any(isinstance(e, FIFOPop) and e.fifo == port \
                            for e in self._walk_expressions(module.body)):
                         self.append_code(
                             f"fifo_{mod_name}_{namify(port.name)}_pop_ready"
                             f".assign(inst_{mod_name}.{namify(port.name)}_pop_ready)"
                             )
+            else:
+                for port in module_ports:
+                    fifo_name = f"fifo_{mod_name}_{namify(port.name)}"
+                    self.append_code(
+                        f"{fifo_name}_pop_ready.assign(Bits(1)(1))"
+                    )
 
             for (callee_mod, callee_port) in unique_push_targets:
                 callee_mod_name = namify(callee_mod.name)
@@ -1657,7 +1677,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             if isinstance(module, ExternalModule) or \
                (hasattr(module, '_attrs') and Module.ATTR_EXTERNAL in module._attrs):
                 continue
-            for port in module.ports:
+            for port in getattr(module, 'ports', []):
                 if port not in all_driven_fifo_ports:
                     fifo_base_name = f'fifo_{namify(module.name)}_{namify(port.name)}'
                     self.append_code(f'{fifo_base_name}_push_valid.assign(Bits(1)(0))')
