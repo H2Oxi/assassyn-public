@@ -113,7 +113,7 @@ def test_pipemul_external():
     print(sys)
 
     config = assassyn.backend.config(
-            verilog=True,  # Force verilog generation
+            verilog = utils.has_verilator(),  # Force verilog generation
             simulator=False,
             sim_threshold=100,
             idle_threshold=100)
