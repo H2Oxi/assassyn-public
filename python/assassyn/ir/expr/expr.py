@@ -105,7 +105,17 @@ class Expr(Value):
 
     def is_valued(self):
         '''If this operation has a return value'''
-        valued = (PureIntrinsic, FIFOPop, ArrayRead, Slice, Cast, Concat, Select, Select1Hot, WireRead)
+        valued = (
+            PureIntrinsic,
+            FIFOPop,
+            ArrayRead,
+            Slice,
+            Cast,
+            Concat,
+            Select,
+            Select1Hot,
+            WireRead,
+        )
         other = isinstance(self, valued)
         return other or self.is_binary() or self.is_unary()
 
@@ -734,17 +744,17 @@ class WireAssign(Expr):
 
     def __init__(self, wire, value):
         super().__init__(WireAssign.WIRE_ASSIGN, [wire, value])
-        
+
     @property
     def wire(self):
         '''Get the wire being assigned to'''
         return self._operands[0]
-        
+
     @property
     def value(self):
         '''Get the value being assigned'''
         return self._operands[1]
-        
+
     def __repr__(self):
         return f'{self.wire.as_operand()} = {self.value.as_operand()}'
 

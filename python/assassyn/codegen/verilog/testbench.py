@@ -32,7 +32,7 @@ async def test_tb(dut):
         {}
         if dut.global_finish.value == 1:
             break
-        
+
 
 
 def runner():
@@ -50,7 +50,7 @@ def runner():
 if __name__ == "__main__":
     runner()'''
 
-def generate_testbench(fname: str, sys: SysBuilder, sim_threshold: int,
+def generate_testbench(fname: str, _sys: SysBuilder, sim_threshold: int,
                        dump_logger: List[str], external_files: List[str]):
     """Generate a testbench file for the given system."""
     with open(fname, "w", encoding='utf-8') as f:

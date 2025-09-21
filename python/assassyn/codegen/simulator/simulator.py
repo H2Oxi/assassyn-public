@@ -15,7 +15,7 @@ from ...utils import namify, repo_path
 
 def dynamiclib_suffix():
     """Return the dynamic library suffix for the current platform.
-    
+
     Returns:
         str: The dynamic library suffix (.dll for Windows, .dylib for macOS, .so for Linux)
     """

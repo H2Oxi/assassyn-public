@@ -13,5 +13,7 @@ from .ir import module
 from .ir.value import Value
 
 # Create a downstream module object with combinational attribute
-class downstream:
+class downstream:  # pylint: disable=too-few-public-methods, invalid-name
+    """Frontend helper exposing the downstream combinational attribute."""
+
     combinational = downstream_combinational

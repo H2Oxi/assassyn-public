@@ -76,51 +76,73 @@ def process_naming(expr, line_of_code: str, lineno: int) -> typing.Dict[str, typ
     return None
 
 
-@decorator
-def ir_builder(func, *args, **kwargs):
-    '''The decorator annotates the function whose return value will be inserted into the AST.'''
-    res = func(*args, **kwargs)
+def _apply_ir_builder(func):
+    """Wrap the given function with IR builder behaviour."""
 
-    # This indicates this res is handled somewhere else, so we do not need to rehandle it
-    if res is None:
+    @decorator
+    def _wrapper(wrapped, *args, **kwargs):
+        res = wrapped(*args, **kwargs)
+
+        # This indicates this res is handled somewhere else, so we do not need to rehandle it
+        if res is None:
+            return res
+
+        #pylint: disable=cyclic-import,import-outside-toplevel
+        from .ir.const import Const
+        from .utils import package_path
+        from .ir.expr import Expr
+
+        if not isinstance(res, Const):
+            if isinstance(res, Expr):
+                res.parent = Singleton.builder.current_block
+                for i in res.operands:
+                    Singleton.builder.current_module.add_external(i)
+            Singleton.builder.insert_point.append(res)
+
+        package_dir = os.path.abspath(package_path())
+
+        Singleton.initialize_dirs_to_exclude()
+        for i in inspect.stack()[2:]:
+            fname, lineno = i.filename, i.lineno
+            fname_abs = os.path.abspath(fname)
+
+            if not fname_abs.startswith(package_dir) \
+                and not any(
+                    fname_abs.startswith(exclude_dir)
+                    for exclude_dir in Singleton.all_dirs_to_exclude
+                ):
+                res.loc = f'{fname}:{lineno}'
+
+                if isinstance(res, Expr):
+                    if res.is_valued() and i.code_context:
+                        line_of_code = i.code_context[0].strip()
+
+                        naming_result = process_naming(
+                            res,
+                            line_of_code,
+                            lineno
+                        )
+                        if naming_result:
+                            res.source_name = naming_result
+                break
+        assert hasattr(res, 'loc')
         return res
 
-    #pylint: disable=cyclic-import,import-outside-toplevel
-    from .ir.const import Const
-    from .utils import package_path
-    from .ir.expr import Expr
+    return _wrapper(func)
 
-    if not isinstance(res, Const):
-        if isinstance(res, Expr):
-            res.parent = Singleton.builder.current_block
-            for i in res.operands:
-                Singleton.builder.current_module.add_external(i)
-        Singleton.builder.insert_point.append(res)
 
-    package_dir = os.path.abspath(package_path())
+def ir_builder(func=None, *, node_type=None):
+    '''Decorator that records builder metadata and injects IR nodes into the AST.'''
 
-    Singleton.initialize_dirs_to_exclude()
-    for i in inspect.stack()[2:]:
-        fname, lineno = i.filename, i.lineno
-        fname_abs = os.path.abspath(fname)
+    def _decorate(target):
+        decorated = _apply_ir_builder(target)
+        if node_type is not None:
+            setattr(decorated, '_ir_builder_node_type', node_type)
+        return decorated
 
-        if not fname_abs.startswith(package_dir) \
-            and not any(fname_abs.startswith(exclude_dir) \
-                         for exclude_dir in Singleton.all_dirs_to_exclude):
-            res.loc = f'{fname}:{lineno}'
-
-            if isinstance(res, Expr):
-                if res.is_valued() and i.code_context:
-                    line_of_code = i.code_context[0].strip()
-
-                    naming_result = process_naming(
-                    res, line_of_code, lineno
-                )
-                    if naming_result:
-                        res.source_name = naming_result
-            break
-    assert hasattr(res, 'loc')
-    return res
+    if func is None:
+        return _decorate
+    return _decorate(func)
 
 
 #pylint: disable=too-many-instance-attributes
