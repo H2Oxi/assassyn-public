@@ -7,12 +7,12 @@ from decorator import decorator
 
 from ...builder import Singleton, ir_builder
 from ..block import Block
+from ..dtype import DType
 from ..expr import Bind, FIFOPop, PureIntrinsic, FIFOPush, AsyncCall, Expr
 from ..expr.intrinsic import wait_until
 from .base import ModuleBase
 
 if typing.TYPE_CHECKING:
-    from ..dtype import DType
     from ..value import Value
 
 def _reserved_module_name(name):
@@ -173,8 +173,6 @@ class Port:
     _users: typing.List[Expr]  # Users of the port
 
     def __init__(self, dtype: DType):
-        #pylint: disable=import-outside-toplevel
-        from ..dtype import DType
         assert isinstance(dtype, DType)
         self.dtype = dtype
         self.name = self.module = None
@@ -232,10 +230,8 @@ def combinational(
 
 class Wire:
     '''A wire for connecting to external modules.'''
-    
+
     def __init__(self, dtype, direction=None, module=None):
-        #pylint: disable=import-outside-toplevel
-        from ..dtype import DType
         if dtype is not None:
             assert isinstance(dtype, DType)
         self.dtype = dtype
@@ -246,28 +242,28 @@ class Wire:
         self.module = module  # Owning external module
         # For backward compatibility, treat the owning module as parent
         self.parent = module
-        
+
     @property
     def users(self):
         '''Get the users of the wire.'''
         return self._users
-        
+
     def __repr__(self):
         dir_str = f", {self.direction}" if self.direction else ""
         return f'Wire<{self.dtype}{dir_str}>'
-        
+
     def assign(self, value):
         '''Assign a value to this wire (for input wires).'''
         if self.direction == 'output':
             raise ValueError("Cannot assign to output wire")
         self.value = value
-        
+
     def get_value(self):
         '''Get the assigned value (for input wires) or the wire itself (for output wires).'''
         if self.direction == 'input':
             return self.value
         return self  # For output wires, return the wire itself
-        
+
     def as_operand(self):
         '''Dump the wire as a right-hand side reference.'''
         if self.module is not None and self.name is not None:
@@ -281,11 +277,11 @@ class Wire:
 
 class WireDict:
     '''A dictionary-like class for managing wires with assignment and access support.'''
-    
+
     def __init__(self, module=None):
         self._wires = {}
         self._module = module
-        
+
     def __setitem__(self, key, value):
         '''Assign a value to a wire.'''
         if key in self._wires:
@@ -304,14 +300,13 @@ class WireDict:
             self._wires[key].assign(value)
         else:
             # Create a new wire with input direction
-            from ..dtype import DType
             if hasattr(value, 'dtype') and isinstance(value.dtype, DType):
                 self._wires[key] = Wire(value.dtype, 'input', self._module)
                 self._wires[key].name = key
                 self._wires[key].assign(value)
             else:
                 raise KeyError(f"Cannot create wire '{key}' - cannot infer type from value")
-            
+
     def __getitem__(self, key):
         '''Get a wire's value or the wire itself.'''
         if key in self._wires:
@@ -325,15 +320,15 @@ class WireDict:
                 self._wires[key].module = self._module
                 self._wires[key].parent = self._module
             return self._wires[key].get_value()
-        else:
-            # Create a new wire with output direction
-            self._wires[key] = Wire(None, 'output', self._module)  # Type will be determined later
-            self._wires[key].name = key
-            return self._wires[key].get_value()
-            
+
+        # Create a new wire with output direction
+        self._wires[key] = Wire(None, 'output', self._module)  # Type will be determined later
+        self._wires[key].name = key
+        return self._wires[key].get_value()
+
     def __contains__(self, key):
         '''Check if a wire exists.'''
         return key in self._wires
-        
+
     def __repr__(self):
         return f'WireDict({self._wires})'

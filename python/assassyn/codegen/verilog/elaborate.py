@@ -78,6 +78,7 @@ endmodule
             f.write(verilog_code)
 
 
+# pylint: disable=too-many-locals,too-many-branches
 def elaborate(sys: SysBuilder, **kwargs) -> str:
     """Elaborate the system into Verilog.
 
