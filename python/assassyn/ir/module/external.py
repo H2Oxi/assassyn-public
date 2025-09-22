@@ -28,6 +28,9 @@ class DirectionalWires:
         wire = self._module._wires.get(key)
         return wire is not None and wire.direction == self._direction
 
+    def __iter__(self):
+        return iter(self.keys())
+
     def __getitem__(self, key):
         wire = self._get_wire(key)
         if self._direction == 'output':
@@ -145,6 +148,13 @@ class ExternalSV(Module):
         '''
         for wire_name, value in kwargs.items():
             self.in_wires[wire_name] = value
+
+        outputs = [self.out_wires[name] for name in self.out_wires]
+        if not outputs:
+            return None
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
 
     def __repr__(self):
         '''String representation of the external module.'''

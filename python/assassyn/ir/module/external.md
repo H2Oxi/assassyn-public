@@ -27,7 +27,7 @@ Both expressions inherit from the general `Expr` base class, so the rest of the 
 
 - **Unified wire adapters**: Declared wires are stored in a single dictionary of `Wire` objects(`python/assassyn/ir/module/module.py`), and lightweight `DirectionalWires` views power both `self.in_wires` and `self.out_wires`. The adapter inspects its configured direction so one class cleanly handles input assignments and output reads.
 
-- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, or using attribute-style access—returns `wire_read(wire_obj)`, ensuring every observation becomes a `WireRead` node.
+- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns `wire_read(wire_obj)`, ensuring every observation becomes a `WireRead` node. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
 
 - **Metadata for downstream stages**: The constructor tags the instance with `Module.ATTR_EXTERNAL` and retains the populated wire dictionary, giving later passes full type/direction information for code emission and validation.
 
@@ -63,14 +63,8 @@ The Verilog backend (`python/assassyn/codegen/verilog/design.py`) consumes those
 
 2. **Drive inputs and read outputs** inside a downstream module:
    ```python
-   ext_adder.in_assign(a=a, b=b)
-   c = ext_adder.out_wires['c']
-   ```
-   `in_assign` records the two input connections via `WireAssign`, and indexing `out_wires` returns a `WireRead` representing the value produced by the external adder.
-
-   TODO support the usage as below:
-   ```python
    c = ext_adder.in_assign(a=a, b=b)
    ```
+   `in_assign` records the two input connections via `WireAssign` and returns the single declared output (`WireRead`), making the value immediately usable.
 
 3. **Integrate the external module** just like native modules. We assumed the external module must be instantiated inside the downstream module, which make sure the value align with the wire connection. The system builder instantiates `ExternalAdder()` and passes it into `Adder.build`, allowing the rest of the design to treat `c` as any other value.

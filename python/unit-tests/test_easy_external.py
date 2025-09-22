@@ -65,9 +65,8 @@ class Adder(Downstream):
         a = a.optional(UInt(32)(1))
         b = b.optional(UInt(32)(1))
 
-        # Instantiate the external adder module
-        ext_adder.in_assign(a=a, b=b)
-        c = ext_adder.out_wires['c']
+        # Instantiate the external adder module and capture its single output
+        c = ext_adder.in_assign(a=a, b=b)
 
         log("downstream: {} + {} = {}", a, b, c)
 

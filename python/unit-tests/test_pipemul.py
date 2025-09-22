@@ -82,10 +82,8 @@ class Wrapper(Downstream):
         in_valid = Bits(1)(1)  # Always valid input
         out_ready = Bits(1)(0)
 
-        # Instantiate the external multiplier module
-        ext_mul.in_assign(a=a, b=b, in_valid=in_valid)
-        out_ready = ext_mul.out_wires['out_valid']
-        p = ext_mul.out_wires['p']
+        # Instantiate the external multiplier module and capture outputs
+        p, out_ready = ext_mul.in_assign(a=a, b=b, in_valid=in_valid)
 
         with Condition(out_ready):
             sink.async_called(data=p)
