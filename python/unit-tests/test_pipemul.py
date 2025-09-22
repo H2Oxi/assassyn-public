@@ -2,7 +2,7 @@ import assassyn
 from assassyn.frontend import *
 from assassyn.backend import elaborate
 from assassyn import utils
-from assassyn.ir.module.external import ExternalModule
+from assassyn.ir.module.external import ExternalSV
 
 
 class Driver(Module):
@@ -30,7 +30,7 @@ class ForwardData(Module):
         data = self.pop_all_ports(True)
         return data
 
-class ExternalMultiplier(ExternalModule):
+class ExternalMultiplier(ExternalSV):
     '''External SystemVerilog multiplier module.'''
 
     def __init__(self, **in_wire_connections):

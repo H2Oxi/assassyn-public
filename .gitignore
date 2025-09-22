@@ -7,5 +7,5 @@ examples/*/__pycache__/
 note/*
 testbench/simulator/ext
 testbench/simulator/build
-3rd-party/*
+
 **/.claude/settings.local.json

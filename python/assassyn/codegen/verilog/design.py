@@ -16,7 +16,7 @@ from .utils import (
 
 from ...analysis import expr_externally_used
 from ...ir.module import Module, Downstream, Port,SRAM, Wire
-from ...ir.module.external import ExternalModule
+from ...ir.module.external import ExternalSV
 from ...builder import SysBuilder
 from ...ir.visitor import Visitor
 from ...ir.block import Block, CondBlock,CycledBlock
@@ -121,7 +121,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
     def _is_external_module(module: Module) -> bool:
         """Return True if the module represents an external implementation."""
 
-        if isinstance(module, ExternalModule):
+        if isinstance(module, ExternalSV):
             return True
 
         attrs = getattr(module, '_attrs', None)
@@ -608,7 +608,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
                 value = expr.value
                 owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
                 wire_name = getattr(wire, 'name', None)
-                if isinstance(owner, ExternalModule) and wire_name:
+                if isinstance(owner, ExternalSV) and wire_name:
                     self.pending_external_inputs[owner].append((wire_name, value))
         elif isinstance(expr, WireRead):
             # Document reads from external module outputs and emit the assignment
@@ -618,7 +618,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             wire_name = getattr(wire, 'name', None)
 
             if (
-                isinstance(owner, ExternalModule)
+                isinstance(owner, ExternalSV)
                 and owner not in self.instantiated_external_modules
             ):
                 ext_module_name = namify(owner.name)
@@ -1269,7 +1269,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         self.append_code('')
 
 
-    def _generate_external_module_wrapper(self, ext_module: ExternalModule):
+    def _generate_external_module_wrapper(self, ext_module: ExternalSV):
         """Generate a PyCDE wrapper class for an external module."""
         class_name = namify(ext_module.name)
         module_name = getattr(ext_module, 'external_module_name', class_name)
@@ -1284,10 +1284,10 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         if getattr(ext_module, 'has_reset', False):
             self.append_code('rst = Reset()')
 
-        # Check if the external module has wires attribute
-        if hasattr(ext_module, 'wires') and hasattr(ext_module.wires, '_wires'):
+        # Check if the external module carries declared wires
+        if hasattr(ext_module, '_wires') and ext_module._wires:
             # Handle wires with explicit directions
-            for wire_name, wire in ext_module.wires._wires.items():
+            for wire_name, wire in ext_module._wires.items():
                 wire_type = dump_type(wire.dtype)
                 if wire.direction == 'input':
                     self.append_code(f'{wire_name} = Input({wire_type})')

@@ -10,7 +10,7 @@ from ...ir.module import SRAM
 from .utils import extract_sram_params
 
 from ...builder import SysBuilder
-from ...ir.module.external import ExternalModule
+from ...ir.module.external import ExternalSV
 
 from ...utils import create_and_clean_dir, repo_path
 
@@ -104,7 +104,7 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
 
     external_sources = set()
     for module in sys.modules:
-        if isinstance(module, ExternalModule) and getattr(module, 'file_path', None):
+        if isinstance(module, ExternalSV) and getattr(module, 'file_path', None):
             external_sources.add(module.file_path)
 
     external_file_names = sorted({Path(file_name).name for file_name in external_sources})
