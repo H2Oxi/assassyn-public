@@ -17,7 +17,7 @@ class DirectionalWires:
         self._direction = direction
 
     def _get_wire(self, key):
-        wire = self._module._wires.get(key)
+        wire = self._module.wires.get(key)
         if wire is None:
             raise KeyError(f"Wire '{key}' not found")
         if wire.direction != self._direction:
@@ -25,7 +25,7 @@ class DirectionalWires:
         return wire
 
     def __contains__(self, key):
-        wire = self._module._wires.get(key)
+        wire = self._module.wires.get(key)
         return wire is not None and wire.direction == self._direction
 
     def __iter__(self):
@@ -45,7 +45,8 @@ class DirectionalWires:
         wire.assign(value)
 
     def keys(self):
-        return [name for name, wire in self._module._wires.items()
+        """Return the names of wires that match this adapter's direction."""
+        return [name for name, wire in self._module.wires.items()
                 if wire.direction == self._direction]
 
 class ExternalSV(Module):
@@ -124,6 +125,11 @@ class ExternalSV(Module):
                 )
             wire_assign(wire_obj, value)
             wire_obj.assign(value)
+
+    @property
+    def wires(self):
+        """Expose declared wires keyed by name for helper adapters."""
+        return self._wires
 
     def __setitem__(self, key, value):
         '''Allow assignment to wires using bracket notation.'''
