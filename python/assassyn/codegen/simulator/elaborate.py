@@ -10,6 +10,9 @@ from pathlib import Path
 from .modules import ElaborateModule
 from .simulator import dump_simulator, dump_main
 from .runtime import dump_runtime, dump_ramulator
+from .external import generate_external_sv_crates
+
+from ...ir.module.external import ExternalSV
 
 if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
@@ -36,6 +39,8 @@ use std::sync::Arc;
     dict_modules_callback = {}
     em = ElaborateModule(sys)
     for module in sys.modules[:] + sys.downstreams[:]:
+        if isinstance(module, ExternalSV):
+            continue
         dict_modules_callback = em.visit_module_for_callback(module)
     required_keys = ["memory", "store", "MemUser_rdata"]
     if all(dict_modules_callback.get(k) is not None for k in required_keys):
@@ -59,6 +64,8 @@ extern "C" fn rust_callback(req: *mut Request, ctx: *mut c_void) {{
         """)
     for module in sys.modules[:] + sys.downstreams[:]:
         # Then, second time dump for real visit modules
+        if isinstance(module, ExternalSV):
+            continue
         module_code = em.visit_module(module)
         fd.write(module_code)
 
@@ -71,8 +78,15 @@ def elaborate_impl(sys, config):
     This matches the Rust function in src/backend/simulator/elaborate.rs
     """
     # Create and clean the simulator directory
-    simulator_name = config.get('dirname', f"{sys.name}_simulator")
-    simulator_path = Path(config.get('path', os.getcwd())) / simulator_name
+    workspace_root = Path(config.get('path', os.getcwd()))
+    simulator_dirname = (
+        config.get('simulator_dirname')
+        or config.get('dirname')
+        or f"{sys.name}_simulator"
+    )
+    simulator_path = workspace_root / simulator_dirname
+    verilator_dirname = config.get('verilator_dirname', f"{sys.name}_verilator")
+    verilator_root = workspace_root / verilator_dirname
 
     # Clean directory if it exists and override is enabled
     if simulator_path.exists() and config.get('override_dump', True):
@@ -81,6 +95,18 @@ def elaborate_impl(sys, config):
     # Create directories
     simulator_path.mkdir(parents=True, exist_ok=True)
     (simulator_path / "src").mkdir(exist_ok=True)
+
+    external_modules = [
+        module for module in sys.modules + sys.downstreams if isinstance(module, ExternalSV)
+    ]
+    ffi_specs = []
+    if external_modules:
+        ffi_specs = generate_external_sv_crates(external_modules, simulator_path, verilator_root)
+    else:
+        shutil.rmtree(verilator_root, ignore_errors=True)
+    config['external_ffis'] = ffi_specs
+    config['verilator_output_root'] = verilator_root
+    config['simulator_output_root'] = simulator_path
 
     print(f"Writing simulator code to rust project: {simulator_path}")
 
@@ -96,6 +122,9 @@ def elaborate_impl(sys, config):
         cargo.write('num-traits = "0.2"\n')
         cargo.write('rand = "0.8"\n')
         cargo.write('libloading = "0.7"\n')
+        for spec in ffi_specs:
+            rel_path = os.path.relpath(spec.crate_path, simulator_path).replace(os.sep, '/')
+            cargo.write(f'{spec.crate_name} = {{ path = "{rel_path}" }}\n')
 
     # Create rustfmt.toml if available
     rustfmt_src = None
@@ -150,8 +179,12 @@ def elaborate(sys, **config):
         Path to the generated Cargo.toml file
     """
 
+    local_config = config.copy()
+    local_config.setdefault('simulator_dirname', f"{sys.name}_simulator")
+    local_config.setdefault('verilator_dirname', f"{sys.name}_verilator")
+
     # Generate the simulator
-    manifest_path = elaborate_impl(sys, config)
+    manifest_path = elaborate_impl(sys, local_config)
 
     # Format the code if cargo fmt is available
     try:
