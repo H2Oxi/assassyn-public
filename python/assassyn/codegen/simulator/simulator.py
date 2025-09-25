@@ -10,14 +10,16 @@ from ...ir.block import CycledBlock
 from ...ir.expr import Expr,Bind
 from ...ir.module import Downstream, Module
 from ...ir.memory.sram import SRAM
+from ...ir.module.external import ExternalSV
+from .external import external_handle_field
 from ...utils import namify, repo_path
 from .port_mapper import get_port_manager
 
 
 def analyze_and_register_ports(sys):
-    """Analyze system and register all array write ports and DRAM modules.
+    """Analyze system and register all array write ports.
 
-    This function scans the entire system to find all array writes and DRAM modules,
+    This function scans the entire system to find all array writes and
     registers them with the port manager, ensuring each writer gets a unique
     port index for compile-time port allocation.
 
@@ -25,18 +27,17 @@ def analyze_and_register_ports(sys):
         sys: The Assassyn system builder
 
     Returns:
-        Tuple of (port_manager, dram_modules) where dram_modules is a list of DRAM instances
+        The port manager with all ports registered
     """
     # pylint: disable=import-outside-toplevel
     from ...ir.expr.array import ArrayWrite
+    from ...ir.expr.intrinsic import Intrinsic
     from ...ir.visitor import Visitor
-    from ...ir.memory.dram import DRAM
 
     manager = get_port_manager()
-    dram_modules = []
 
     class PortRegistrationVisitor(Visitor):
-        """Visitor that registers array write ports and collects DRAM modules."""
+        """Visitor that registers array write ports."""
 
         def visit_expr(self, node):
             """Visit an expression and register array writes."""
@@ -45,17 +46,17 @@ def analyze_and_register_ports(sys):
                 writer_name = namify(node.module.name)
                 manager.get_or_assign_port(array_name, writer_name)
 
-            # MEM_WRITE intrinsic was removed, so no need to handle it
-
-        def visit_module(self, node):
-            """Visit modules to collect DRAM instances."""
-            if isinstance(node, DRAM):
-                dram_modules.append(node)
+            # Check for DRAM writes (MEM_WRITE intrinsic)
+            elif isinstance(node, Intrinsic) and node.opcode == Intrinsic.MEM_WRITE:
+                array = node.args[0]
+                array_name = namify(array.name)
+                # DRAM callback gets its own port
+                manager.get_or_assign_port(array_name, "DRAM_CALLBACK")
 
     visitor = PortRegistrationVisitor()
     visitor.visit_system(sys)
 
-    return manager, dram_modules
+    return manager
 
 
 def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-many-statements
@@ -74,9 +75,9 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
             - fifo_depth: Default FIFO depth
         fd: File descriptor to write to
     """
-    # First, analyze the system to determine port requirements and collect DRAM modules
+    # First, analyze the system to determine port requirements
     # This registers all array write ports with the global port manager
-    port_manager, dram_modules = analyze_and_register_ports(sys)
+    analyze_and_register_ports(sys)
 
     # Write imports
     fd.write("use sim_runtime::*;\n")
@@ -92,17 +93,15 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     simulator_init = []
     downstream_reset = []
     registers = []
+    external_specs = {spec.original_module_name: spec for spec in config.get('external_ffis', [])}
 
     # Begin simulator struct definition
     fd.write("pub struct Simulator { pub stamp: usize, ")
+    fd.write("pub mem_interface: MemoryInterface,\n")
     fd.write("pub request_stamp_map_table: HashMap<i64, usize>,\n")
     home = repo_path()
-    # Add per-DRAM memory interfaces and response fields
-    for dram in dram_modules:
-        dram_name = namify(dram.name)
-        fd.write(f"pub mi_{dram_name}: MemoryInterface,\n")
-        fd.write(f"pub {dram_name}_response: Response,\n")
     # Add array fields to simulator struct
+    port_manager = get_port_manager()
     for array in sys.arrays:
         name = namify(array.name)
         dtype = dtype_to_rust_type(array.scalar_ty)
@@ -152,6 +151,17 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
                 if isinstance(expr, Expr):
                     expr_validities.add(expr)
 
+        if isinstance(module, ExternalSV):
+            spec = external_specs.get(module.name)
+            handle_field = external_handle_field(module.name)
+            if spec is not None:
+                field_type = f"{spec.crate_name}::{spec.struct_name}"
+                fd.write(f"pub {handle_field} : {field_type}, ")
+                simulator_init.append(f"{handle_field} : {field_type}::new(),")
+            else:
+                fd.write(f"pub {handle_field} : (), ")
+                simulator_init.append(f"{handle_field} : (),")
+
     # Add value validity tracking for expressions with external visibility
     for expr in expr_validities:
         if isinstance(expr, Bind):
@@ -170,22 +180,15 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
 
     # Constructor
     fd.write("  pub fn new() -> Self {\n")
-    # Initialize per-DRAM memory interfaces
-    for dram in dram_modules:
-        dram_name = namify(dram.name)
-        fd.write(f"    let mi_{dram_name} = unsafe {{")
-        fd.write('MemoryInterface::new_from_cwrapper_path()')
-        fd.write(f'.expect("Failed to create MemoryInterface for {dram_name}") }};\n')
-        simulator_init.append(f"mi_{dram_name}: mi_{dram_name},")
-        simulator_init.append(  # noqa: E501
-            f"{dram_name}_response: Response {{ valid: false, addr: 0, "
-            f"data: Vec::new(), read_succ: false, write_succ: false, "
-            f"is_write: false }},")
+    fd.write("let mem = unsafe {")
+    fd.write('MemoryInterface::new_from_cwrapper_path()')
+    fd.write('.expect("Failed to create MemoryInterface") };')
     fd.write("    Simulator {\n")
     fd.write("      stamp: 0,\n")
     fd.write("      request_stamp_map_table: HashMap::new(),\n")
     for init in simulator_init:
         fd.write(f"      {init}\n")
+    fd.write("      mem_interface: mem,\n")
     fd.write("    }\n")
     fd.write("  }\n\n")
 
@@ -204,15 +207,6 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     fd.write("  pub fn tick_registers(&mut self) {\n")
     for reg in registers:
         fd.write(f"    self.{reg}.tick(self.stamp);\n")
-    fd.write("  }\n\n")
-
-    # Reset DRAM responses method
-    fd.write("  pub fn reset_dram(&mut self) {\n")
-    for dram in dram_modules:
-        dram_name = namify(dram.name)
-        fd.write(f"    self.{dram_name}_response.valid = false;\n")
-        fd.write(f"    self.{dram_name}_response.read_succ = false;\n")
-        fd.write(f"    self.{dram_name}_response.write_succ = false;\n")
     fd.write("  }\n\n")
 
     # Get topological order for downstream modules
@@ -268,15 +262,12 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Generate simulate function
     fd.write("pub fn simulate() {\n")
     fd.write("  let mut sim = Simulator::new();\n")
-    # Initialize each DRAM with configuration
-    for dram in dram_modules:
-        dram_name = namify(dram.name)
-        fd.write(f"""
+    fd.write(f"""
      unsafe {{
-            sim.mi_{dram_name}
+            sim.mem_interface
                 .init("{home}/tools/c-ramulator2-wrapper/configs/example_config.yaml");
         }}
-    """)  # noqa: E501
+    """)
 
     # Handle randomization if enabled
     if config.get('random', False):
@@ -377,19 +368,12 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
 
         sim.stamp += 50;
         sim.tick_registers();
-        sim.reset_dram();
         unsafe {{
-            // Tick all DRAM memory interfaces
-""")
-
-    for dram in dram_modules:
-        dram_name = namify(dram.name)
-        fd.write(f"            sim.mi_{dram_name}.frontend_tick();\n")
-        fd.write(f"            sim.mi_{dram_name}.memory_system_tick();\n")
-
-    fd.write("        }\n")
-    fd.write("      }\n")
-    fd.write("    ")
+            sim.mem_interface.frontend_tick();
+            sim.mem_interface.memory_system_tick();
+        }}
+      }}
+    """)
 
     # Close simulate function
     fd.write("}\n")
