@@ -7,90 +7,142 @@ import shutil
 import subprocess
 import typing
 from pathlib import Path
+
 from .modules import dump_modules
 from .simulator import dump_simulator
+from .external import generate_external_sv_crates
+
+from ...ir.module.external import ExternalSV
 from ...utils import repo_path
 
 if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
 
 
-def elaborate_impl(sys, config):
-    """Internal implementation of the elaborate function.
+def _resolve_workspace_paths(sys: "SysBuilder", config: dict[str, typing.Any]):
+    """Return the workspace root and derived output paths."""
 
-    This matches the Rust function in src/backend/simulator/elaborate.rs
-    """
-    # Create and clean the simulator directory
-    simulator_name = config.get('dirname', "simulator")
-    simulator_path = Path(config.get('path', os.getcwd())) / simulator_name
+    workspace_root = Path(config.get('path', os.getcwd()))
+    simulator_dirname = (
+        config.get('simulator_dirname')
+        or config.get('dirname')
+        or f"{sys.name}_simulator"
+    )
+    simulator_path = workspace_root / simulator_dirname
+    verilator_dirname = config.get('verilator_dirname', f"{sys.name}_verilator")
+    verilator_root = workspace_root / verilator_dirname
+    return workspace_root, simulator_path, verilator_root
 
-    # Clean directory if it exists and override is enabled
-    if simulator_path.exists() and config.get('override_dump', True):
-        shutil.rmtree(simulator_path)
 
-    # Create directories
-    simulator_path.mkdir(parents=True, exist_ok=True)
-    (simulator_path / "src").mkdir(exist_ok=True)
+def _populate_external_metadata(
+    sys: "SysBuilder",
+    config: dict[str, typing.Any],
+    simulator_path: Path,
+    verilator_root: Path,
+):
+    """Generate FFI crates for ExternalSV modules and attach metadata."""
 
-    print(f"Writing simulator code to rust project: {simulator_path}")
+    external_modules = [
+        module for module in sys.modules + sys.downstreams if isinstance(module, ExternalSV)
+    ]
 
-    # Create Cargo.toml
+    ffi_specs = []
+    if external_modules:
+        ffi_specs = generate_external_sv_crates(
+            external_modules,
+            simulator_path,
+            verilator_root,
+        )
+    else:
+        shutil.rmtree(verilator_root, ignore_errors=True)
+
+    config['external_ffis'] = ffi_specs
+    config['verilator_output_root'] = verilator_root
+    config['simulator_output_root'] = simulator_path
+
+    if ffi_specs:
+        sys._external_ffi_specs = {  # pylint: disable=protected-access
+            spec.original_module_name: spec for spec in ffi_specs
+        }
+    else:
+        sys._external_ffi_specs = {}  # pylint: disable=protected-access
+
+    return ffi_specs
+
+
+def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs) -> Path:
+    """Create the Cargo manifest for the generated simulator."""
+
     manifest_path = simulator_path / "Cargo.toml"
     runtime_path = Path(repo_path()) / "tools" / "rust-sim-runtime"
-    with open(manifest_path, 'w', encoding="utf-8") as cargo:
+
+    with open(manifest_path, 'w', encoding='utf-8') as cargo:
         cargo.write("[package]\n")
         cargo.write(f'name = "{sys.name}_simulator"\n')
         cargo.write('version = "0.1.0"\n')
         cargo.write('edition = "2021"\n')
         cargo.write('[dependencies]\n')
         cargo.write(f'sim-runtime = {{ path = "{runtime_path}" }}\n')
+        for spec in ffi_specs:
+            rel_path = os.path.relpath(spec.crate_path, simulator_path).replace(os.sep, '/')
+            cargo.write(f'{spec.crate_name} = {{ path = "{rel_path}" }}\n')
 
-    # Create rustfmt for the generated project
-    shutil.copy(Path(repo_path()) / "rustfmt.toml", simulator_path / "rustfmt.toml")
+    return manifest_path
 
-    # Generate modules directory and files
+
+def elaborate_impl(sys: "SysBuilder", config: dict[str, typing.Any]):
+    """Internal implementation of the elaborate function."""
+
+    _, simulator_path, verilator_root = _resolve_workspace_paths(sys, config)
+
+    if simulator_path.exists() and config.get('override_dump', True):
+        shutil.rmtree(simulator_path)
+
+    simulator_path.mkdir(parents=True, exist_ok=True)
+    (simulator_path / "src").mkdir(exist_ok=True)
+
+    ffi_specs = _populate_external_metadata(sys, config, simulator_path, verilator_root)
+
+    print(f"Writing simulator code to rust project: {simulator_path}")
+
+    manifest_path = _write_manifest(sys, simulator_path, ffi_specs)
+
+    rustfmt_src = Path(repo_path()) / "rustfmt.toml"
+    if rustfmt_src.exists():
+        shutil.copy(rustfmt_src, simulator_path / "rustfmt.toml")
+
     modules_dir = simulator_path / "src" / "modules"
     dump_modules(sys, modules_dir)
 
-    # Generate simulator.rs
     with open(simulator_path / "src/simulator.rs", 'w', encoding='utf-8') as fd:
         dump_simulator(sys, config, fd)
 
-    # Generate main.rs
     template_main = Path(__file__).resolve().parent / "template" / "main.rs"
     shutil.copy(template_main, simulator_path / "src/main.rs")
 
     return manifest_path
 
 
-def elaborate(sys, **config):
-    """Generate a Rust-based simulator for the given Assassyn system.
+def elaborate(sys: "SysBuilder", **config):
+    """Generate a Rust-based simulator for the given Assassyn system."""
 
-    This function is the main entry point for simulator generation. It takes
-    an Assassyn system builder and configuration options, and generates a Rust
-    project that can simulate the system.
-
-    Args:
-        sys: The Assassyn system builder
-        **config: Refer to ..codegen for the list of options
-
-    Returns:
-        Path to the generated Cargo.toml file
-    """
     # pylint: disable=import-outside-toplevel
     from .port_mapper import reset_port_manager
+
     reset_port_manager()
 
-    # Generate the simulator
-    manifest_path = elaborate_impl(sys, config)
+    local_config = config.copy()
+    local_config.setdefault('simulator_dirname', f"{sys.name}_simulator")
+    local_config.setdefault('verilator_dirname', f"{sys.name}_verilator")
 
-    # Format the code if cargo fmt is available
+    manifest_path = elaborate_impl(sys, local_config)
+
     try:
         subprocess.run(
             ["cargo", "fmt", "--manifest-path", str(manifest_path)],
             check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Warning: Failed to format code with cargo fmt")
