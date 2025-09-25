@@ -108,6 +108,11 @@ def elaborate_impl(sys, config):
     config['verilator_output_root'] = verilator_root
     config['simulator_output_root'] = simulator_path
 
+    if ffi_specs:
+        sys._external_ffi_specs = {spec.original_module_name: spec for spec in ffi_specs}
+    else:
+        sys._external_ffi_specs = {}
+
     print(f"Writing simulator code to rust project: {simulator_path}")
 
     # Create Cargo.toml

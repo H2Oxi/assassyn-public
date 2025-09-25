@@ -10,7 +10,9 @@ from ...builder import SysBuilder
 from ...ir.block import CycledBlock
 from ...ir.expr import Expr,Bind
 from ...ir.module import Downstream, Module, SRAM
+from ...ir.module.external import ExternalSV
 from ...utils import namify, repo_path
+from .external import external_handle_field
 
 
 def dynamiclib_suffix():
@@ -62,6 +64,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     simulator_init = []
     downstream_reset = []
     registers = []
+    external_specs = {spec.original_module_name: spec for spec in config.get('external_ffis', [])}
 
     # Begin simulator struct definition
     fd.write("pub struct Simulator { pub stamp: usize, ")
@@ -113,6 +116,17 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
             for expr in module.externals:
                 if isinstance(expr, Expr):
                     expr_validities.add(expr)
+
+        if isinstance(module, ExternalSV):
+            spec = external_specs.get(module.name)
+            handle_field = external_handle_field(module.name)
+            if spec is not None:
+                field_type = f"{spec.crate_name}::{spec.struct_name}"
+                fd.write(f"pub {handle_field} : {field_type}, ")
+                simulator_init.append(f"{handle_field} : {field_type}::new(),")
+            else:
+                fd.write(f"pub {handle_field} : (), ")
+                simulator_init.append(f"{handle_field} : (),")
 
     # Add value validity tracking for expressions with external visibility
     for expr in expr_validities:

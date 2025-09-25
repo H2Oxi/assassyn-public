@@ -25,11 +25,15 @@ from ...ir.expr import (
         Select1Hot,
         Slice,
         Concat,
+        WireAssign,
+        WireRead,
 )
 from .utils import dtype_to_rust_type, fifo_name
 from ...utils import namify
 from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
+from ...ir.module.external import ExternalSV
+from .external import external_handle_field
 
 if typing.TYPE_CHECKING:
     from ...ir.module import Module
@@ -45,6 +49,7 @@ class ElaborateModule(Visitor):
         self.module_name = ""
         self.module_ctx = None
         self.modules_for_callback = {}
+        self.external_specs = getattr(sys, '_external_ffi_specs', {})
 
     def visit_module_for_callback(self, node: Module):
         """Visit a module to collect module names for callback."""
@@ -58,7 +63,10 @@ class ElaborateModule(Visitor):
         self.module_name = node.name
         self.module_ctx = node
 
-        # Create function header
+        if isinstance(node, ExternalSV):
+            return self.visit_external_module(node)
+
+        # Create function header for standard modules
         result = [f"\n// Elaborating module {self.module_name}"]
         result.append(f"pub fn {namify(self.module_name)}(sim: &mut Simulator) -> bool {{")
 
@@ -253,6 +261,46 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
                 ValueCastTo::<{dtype_to_rust_type(dtype)}>::cast(&c)
             }}""")
 
+        elif isinstance(node, WireAssign):
+            wire = node.wire
+            owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
+            wire_name = getattr(wire, 'name', None)
+            value = dump_rval_ref(self.module_ctx, self.sys, node.value)
+            module_writer = namify(self.module_name)
+
+            if isinstance(owner, ExternalSV) and wire_name:
+                fifo_id = f"{namify(owner.name)}_{namify(wire_name)}"
+                rust_ty = dtype_to_rust_type(wire.dtype)
+                code.append(f"// External wire assign: {owner.name}.{wire_name} = {{value}}".replace("{value}", value))
+                code.append(
+                    f"{{\n  let stamp = sim.stamp;\n  let data = ValueCastTo::<{rust_ty}>::cast(&{value});\n  sim.{fifo_id}.push.push(FIFOPush::new(stamp + 50, data, \"{module_writer}\"));\n}}"
+                )
+                event_queue = f"{namify(owner.name)}_event"
+                code.append(
+                    f"{{\n  let stamp = sim.stamp - sim.stamp % 100 + 100;\n  sim.{event_queue}.push_back(stamp)\n}}"
+                )
+            else:
+                expr_repr = node.__repr__()
+                code.append(f"/* TODO: unsupported wire assign {expr_repr} */")
+
+        elif isinstance(node, WireRead):
+            wire = node.wire
+            owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
+            wire_name = getattr(wire, 'name', None)
+            expr_repr = node.__repr__()
+
+            if isinstance(owner, ExternalSV) and wire_name:
+                fifo_id = f"{namify(owner.name)}_{namify(wire_name)}"
+                module_writer = namify(self.module_name)
+                rust_ty = dtype_to_rust_type(node.dtype)
+                ready_var = f"{namify(node.as_operand())}_ready"
+                code.append(f"/* External wire read: {owner.name}.{wire_name} */")
+                code.append(
+                    f"{{\n  let {ready_var} = !sim.{fifo_id}.is_empty();\n  if !{ready_var} {{\n    return false;\n  }}\n  let raw = {{\n    let stamp = sim.stamp - sim.stamp % 100 + 50;\n    sim.{fifo_id}.pop.push(FIFOPop::new(stamp, \"{module_writer}\"));\n    match sim.{fifo_id}.payload.front() {{\n      Some(value) => value.clone(),\n      None => return false,\n    }}\n  }};\n  ValueCastTo::<{rust_ty}>::cast(&raw)\n}}"
+                )
+            else:
+                code.append(f"panic!(\"Unsupported external wire read: {expr_repr}\")")
+
         elif isinstance(node, Select):
             cond = dump_rval_ref(self.module_ctx, self.sys, node.cond)
             true_value = dump_rval_ref(self.module_ctx, self.sys, node.true_value)
@@ -434,3 +482,65 @@ assert!(cond.count_ones() == 1, \"Select1Hot: condition is not 1-hot\");''']
             result.append(f"{' ' * self.indent}}}\n")
 
         return "".join(result)
+
+    def visit_external_module(self, node: ExternalSV):
+        """Generate simulator implementation for an ExternalSV module."""
+
+        module_name = node.name
+        module_id = namify(module_name)
+        spec = self.external_specs.get(module_name)
+        if spec is None:
+            raise ValueError(f"Missing external FFI spec for module {module_name}")
+
+        result = [f"\n// Elaborating external module {module_name}"]
+        result.append(f"pub fn {module_id}(sim: &mut Simulator) -> bool {{")
+        self.indent += 2
+        indent = " " * self.indent
+
+        for port in spec.inputs:
+            fifo_id = f"{module_id}_{port.name}"
+            ready_var = f"{port.name}_ready"
+            result.append(f"{indent}let {ready_var} = {{ !sim.{fifo_id}.is_empty() }};")
+            result.append(f"{indent}if !{ready_var} {{")
+            result.append(f"{indent}  return false;")
+            result.append(f"{indent}}};")
+            result.append(f"{indent}let {port.name} = {{")
+            result.append(f"{indent}  {{")
+            result.append(f"{indent}    let stamp = sim.stamp - sim.stamp % 100 + 50;")
+            result.append(
+                f"{indent}    sim.{fifo_id}.pop.push(FIFOPop::new(stamp, \"{module_name}\"));"
+            )
+            result.append(f"{indent}    match sim.{fifo_id}.payload.front() {{")
+            result.append(f"{indent}      Some(value) => value.clone(),")
+            result.append(f"{indent}      None => return false,")
+            result.append(f"{indent}    }}")
+            result.append(f"{indent}  }}")
+            result.append(f"{indent}}};")
+
+        handle_field = external_handle_field(module_name)
+        result.append(f"{indent}let ffi = &mut sim.{handle_field};")
+
+        for port in spec.inputs:
+            result.append(
+                f"{indent}ffi.set_{port.name}(ValueCastTo::<{port.rust_type}>::cast(&{port.name}));"
+            )
+
+        result.append(f"{indent}ffi.eval();")
+
+        for port in spec.outputs:
+            output_var = f"{port.name}_out"
+            fifo_id = f"{module_id}_{port.name}"
+            result.append(f"{indent}let {output_var} = ffi.get_{port.name}();")
+            result.append(f"{indent}{{")
+            result.append(f"{indent}  let stamp = sim.stamp;")
+            result.append(
+                f"{indent}  sim.{fifo_id}.push.push(\
+FIFOPush::new(stamp + 50, {output_var}, \"{module_name}\"));"
+            )
+            result.append(f"{indent}}};")
+
+        result.append(f"{indent}true")
+        self.indent -= 2
+        result.append(" }")
+
+        return "\n".join(result)

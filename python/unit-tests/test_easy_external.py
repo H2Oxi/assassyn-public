@@ -90,7 +90,7 @@ def test_easy_external():
 
     config = assassyn.backend.config(
             verilog=utils.has_verilator(),
-            simulator=False,
+            #simulator=False,
             sim_threshold=100,
             idle_threshold=100)
 
