@@ -91,7 +91,6 @@ def test_easy_external():
         'sim_threshold': 100,
         'idle_threshold': 100
     }
-
     simulator_path, verilator_path = elaborate(sys, **config)
 
     if verilator_path:
