@@ -290,13 +290,20 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
     crate.struct_name = struct_name
     raw_mod_lines = ["pub mod raw {", "    use super::ModuleHandle;"]
     prefix = crate.symbol_prefix
-    for line in [
-            f"    extern \"C\" {{",
-            f"        pub fn {prefix}_new() -> *mut ModuleHandle;",
-            f"        pub fn {prefix}_free(handle: *mut ModuleHandle);",
-            f"        pub fn {prefix}_eval(handle: *mut ModuleHandle);",
-        ]:
-        raw_mod_lines.append(line)
+    raw_mod_lines.extend([
+        "    extern \"C\" {",
+        f"        pub fn {prefix}_new() -> *mut ModuleHandle;",
+        f"        pub fn {prefix}_free(handle: *mut ModuleHandle);",
+        f"        pub fn {prefix}_eval(handle: *mut ModuleHandle);",
+    ])
+    if crate.has_clock:
+        raw_mod_lines.append(
+            f"        pub fn {prefix}_set_clk(handle: *mut ModuleHandle, value: u8);"
+        )
+    if crate.has_reset:
+        raw_mod_lines.append(
+            f"        pub fn {prefix}_set_rst(handle: *mut ModuleHandle, value: u8);"
+        )
     for port in crate.inputs:
         raw_mod_lines.append(
             f"        pub fn {prefix}_set_{port.name}(handle: *mut ModuleHandle, value: {port.rust_type});"
@@ -308,34 +315,120 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
     raw_mod_lines.append("    }")
     raw_mod_lines.append("}")
 
-    fn_lines = [
+    struct_lines = [
         "#[allow(dead_code)]",
-        "pub struct " + struct_name + " {",
+        f"pub struct {struct_name} {{",
         "    ptr: *mut ModuleHandle,",
-        "}",
-        "",
-        "impl " + struct_name + " {",
-        f"    pub fn new() -> Self {{",
+    ]
+    if crate.has_clock:
+        struct_lines.append("    clk_state: u8,")
+    if crate.has_reset:
+        struct_lines.append("    rst_state: u8,")
+    struct_lines.append("}")
+    struct_lines.append("")
+
+    impl_lines = [
+        f"impl {struct_name} {{",
+        "    pub fn new() -> Self {",
         f"        let ptr = unsafe {{ raw::{prefix}_new() }};",
         f"        assert!(!ptr.is_null(), \"{prefix}_new returned null\");",
-        "        Self { ptr }",
-        "    }",
-        "",
-        "    pub fn eval(&mut self) { unsafe { raw::" + prefix + "_eval(self.ptr) } }",
     ]
+    if crate.has_clock:
+        impl_lines.append(f"        unsafe {{ raw::{prefix}_set_clk(ptr, 0); }}")
+    if crate.has_reset:
+        impl_lines.append(f"        unsafe {{ raw::{prefix}_set_rst(ptr, 0); }}")
+    impl_lines.append("        Self {")
+    impl_lines.append("            ptr,")
+    if crate.has_clock:
+        impl_lines.append("            clk_state: 0,")
+    if crate.has_reset:
+        impl_lines.append("            rst_state: 0,")
+    impl_lines.append("        }")
+    impl_lines.append("    }")
+    impl_lines.append("")
+    impl_lines.append(
+        f"    pub fn eval(&mut self) {{ unsafe {{ raw::{prefix}_eval(self.ptr) }} }}"
+    )
+    if crate.has_clock or crate.has_reset:
+        impl_lines.append("")
+    if crate.has_clock:
+        impl_lines.extend(
+            [
+                "    pub fn set_clock(&mut self, value: bool) {",
+                "        let value = value as u8;",
+                f"        unsafe {{ raw::{prefix}_set_clk(self.ptr, value) }};",
+                "        self.clk_state = value;",
+                "    }",
+                "",
+            ]
+        )
+    if crate.has_reset:
+        impl_lines.extend(
+            [
+                "    pub fn set_reset(&mut self, value: bool) {",
+                "        let value = value as u8;",
+                f"        unsafe {{ raw::{prefix}_set_rst(self.ptr, value) }};",
+                "        self.rst_state = value;",
+                "    }",
+                "",
+            ]
+        )
+    if crate.has_clock:
+        impl_lines.extend(
+            [
+                "    pub fn clock_tick(&mut self) {",
+                "        self.set_clock(false);",
+                "        self.eval();",
+                "        self.set_clock(true);",
+                "        self.eval();",
+                "    }",
+                "",
+            ]
+        )
+    if crate.has_reset:
+        if crate.has_clock:
+            impl_lines.extend(
+                [
+                    "    pub fn apply_reset(&mut self, cycles: usize) {",
+                    "        self.set_reset(true);",
+                    "        for _ in 0..cycles.max(1) {",
+                    "            self.clock_tick();",
+                    "        }",
+                    "        self.set_reset(false);",
+                    "        self.clock_tick();",
+                    "    }",
+                    "",
+                ]
+            )
+        else:
+            impl_lines.extend(
+                [
+                    "    pub fn apply_reset(&mut self, cycles: usize) {",
+                    "        let _ = cycles;",
+                    "        self.set_reset(true);",
+                    "        self.eval();",
+                    "        self.set_reset(false);",
+                    "        self.eval();",
+                    "    }",
+                    "",
+                ]
+            )
     for port in crate.inputs:
-        fn_lines.append(
+        impl_lines.append(
             f"    pub fn set_{port.name}(&mut self, value: {port.rust_type}) {{ unsafe {{ raw::{prefix}_set_{port.name}(self.ptr, value) }} }}"
         )
     for port in crate.outputs:
-        fn_lines.append(
+        impl_lines.append(
             f"    pub fn get_{port.name}(&mut self) -> {port.rust_type} {{ unsafe {{ raw::{prefix}_get_{port.name}(self.ptr) }} }}"
         )
-    fn_lines.append("}")
-    fn_lines.append("")
-    fn_lines.append("impl Drop for " + struct_name + " {")
-    fn_lines.append("    fn drop(&mut self) { unsafe { raw::" + prefix + "_free(self.ptr) } }")
-    fn_lines.append("}")
+    impl_lines.append("}")
+    impl_lines.append("")
+
+    drop_lines = [
+        f"impl Drop for {struct_name} {{",
+        f"    fn drop(&mut self) {{ unsafe {{ raw::{prefix}_free(self.ptr) }} }}",
+        "}",
+    ]
 
     return "\n".join([
         "#![allow(dead_code)]",
@@ -345,7 +438,9 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
         "",
         *raw_mod_lines,
         "",
-        *fn_lines,
+        *struct_lines,
+        *impl_lines,
+        *drop_lines,
     ])
 
 
@@ -373,6 +468,14 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
         "",
         f"void {prefix}_eval(ModuleHandle* handle) {{ handle->eval(); }}",
     ]
+    if crate.has_clock:
+        lines.append(
+            f"void {prefix}_set_clk(ModuleHandle* handle, uint8_t value) {{ handle->clk = static_cast<uint8_t>(value & 0x1U); }}"
+        )
+    if crate.has_reset:
+        lines.append(
+            f"void {prefix}_set_rst(ModuleHandle* handle, uint8_t value) {{ handle->rst = static_cast<uint8_t>(value & 0x1U); }}"
+        )
     for port in crate.inputs:
         lines.append(
             f"void {prefix}_set_{port.name}(ModuleHandle* handle, {port.c_type} value) {{ handle->{port.name} = static_cast<{port.c_type}>(value); }}"
@@ -480,6 +583,8 @@ def generate_external_sv_crates(
                 "sv": spec.sv_filename,
                 "crate_dir": os.path.relpath(spec.crate_path, simulator_root),
                 "struct_name": spec.struct_name,
+                "has_clock": spec.has_clock,
+                "has_reset": spec.has_reset,
                 "inputs": [
                     {
                         "name": port.name,

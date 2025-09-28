@@ -60,7 +60,8 @@ class ElaborateModule(Visitor):
         self.pending_eval = {}
 
         if isinstance(node, ExternalSV):
-            return self.visit_external_module(node)
+            # External modules are handled by dedicated FFI glue instead of simulator stubs.
+            return ""
 
         # Create function header
         result = [f"\n// Elaborating module {self.module_name}"]
