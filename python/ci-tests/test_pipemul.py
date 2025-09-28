@@ -79,7 +79,7 @@ class Wrapper(Downstream):
         #here we assumed user explicitly know the direction of the external module ports
         a = a.optional(UInt(32)(1))
         b = b.optional(UInt(32)(1))
-        in_valid = Bits(1)(1)  # Always valid input
+        in_valid = a > UInt(32)(2)  # Always valid input
         out_ready = Bits(1)(0)
 
         # Instantiate the external multiplier module and capture outputs
@@ -89,6 +89,7 @@ class Wrapper(Downstream):
             sink.async_called(data=p)
 
         log("downstream: {} * {} ", a, b)
+        log("in_valid: {}, out_ready: {}, p: {}", in_valid, out_ready, p)
 
 
 def test_pipemul_external():
