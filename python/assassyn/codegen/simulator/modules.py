@@ -64,7 +64,8 @@ class ElaborateModule(Visitor):
         self.module_ctx = node
 
         if isinstance(node, ExternalSV):
-            return self.visit_external_module(node)
+            # External modules are handled by dedicated FFI glue instead of simulator stubs.
+            return ""
 
         # Create function header for standard modules
         result = [f"\n// Elaborating module {self.module_name}"]

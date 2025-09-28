@@ -192,6 +192,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Module simulation functions
     simulators = []
     for module in sys.modules[:] + sys.downstreams[:]:
+        if isinstance(module, ExternalSV):
+            continue
         module_name = namify(module.name)
         fd.write(f"  fn simulate_{module_name}(&mut self) {{\n")
 
@@ -260,6 +262,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Add simulators for downstream modules
     fd.write("  let downstreams : Vec<fn(&mut Simulator)> = vec![")
     for downstream in downstreams:
+        if isinstance(downstream, ExternalSV):
+            continue
         module_name = downstream.name
         fd.write(f"Simulator::simulate_{module_name}, ")
     fd.write("];\n")
