@@ -132,4 +132,3 @@ def mem_resp(memory):
 def use_dram(dram):
     '''Use a DRAM module.'''
     return Intrinsic(Intrinsic.USE_DRAM, dram)
-    

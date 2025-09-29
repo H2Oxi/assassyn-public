@@ -77,6 +77,7 @@ def elaborate_impl(sys, config):
 
     This matches the Rust function in src/backend/simulator/elaborate.rs
     """
+    # pylint: disable=too-many-locals, too-many-statements
     # Create and clean the simulator directory
     workspace_root = Path(config.get('path', os.getcwd()))
     simulator_dirname = (
@@ -109,9 +110,11 @@ def elaborate_impl(sys, config):
     config['simulator_output_root'] = simulator_path
 
     if ffi_specs:
-        sys._external_ffi_specs = {spec.original_module_name: spec for spec in ffi_specs}
+        sys._external_ffi_specs = {  # pylint: disable=protected-access
+            spec.original_module_name: spec for spec in ffi_specs
+        }
     else:
-        sys._external_ffi_specs = {}
+        sys._external_ffi_specs = {}  # pylint: disable=protected-access
 
     print(f"Writing simulator code to rust project: {simulator_path}")
 

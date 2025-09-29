@@ -39,7 +39,7 @@ from ...ir.module.downstream import Downstream
 if typing.TYPE_CHECKING:
     from ...ir.module import Module
 
-class ElaborateModule(Visitor):
+class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
     """Visitor for elaborating modules with multi-port write support."""
 
     def __init__(self, sys):
@@ -299,7 +299,10 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
 
             if isinstance(owner, ExternalSV) and wire_name:
                 port_spec = self._lookup_external_port(owner.name, wire_name, 'input')
-                rust_ty = port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
+                if port_spec is not None:
+                    rust_ty = port_spec.rust_type
+                else:
+                    rust_ty = dtype_to_rust_type(wire.dtype)
                 handle_field = external_handle_field(owner.name)
                 method_suffix = namify(wire_name)
                 casted_value = f"ValueCastTo::<{rust_ty}>::cast(&{value})"
@@ -316,20 +319,22 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
                 if spec is not None and not getattr(spec, 'has_clock', False):
                     self.pending_eval[owner.name] = True
             else:
-                expr_repr = node.__repr__()
+                expr_repr = repr(node)
                 code.append(f"/* TODO: unsupported wire assign {expr_repr} */")
 
         elif isinstance(node, WireRead):
             wire = node.wire
             owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
             wire_name = getattr(wire, 'name', None)
-            expr_repr = node.__repr__()
+            expr_repr = repr(node)
 
             if isinstance(owner, ExternalSV) and wire_name:
                 rust_ty = dtype_to_rust_type(node.dtype)
                 handle_field = external_handle_field(owner.name)
                 method_suffix = namify(wire_name)
-                code.append(f"/* External wire read: {owner.name}.{wire_name} */")
+                code.append(
+                    f"/* External wire read: {owner.name}.{wire_name} */"
+                )
                 spec = self.external_specs.get(owner.name)
                 eval_line = ""
                 if spec is not None and not getattr(spec, 'has_clock', False):
@@ -337,7 +342,8 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
                         eval_line = f"  sim.{handle_field}.eval();\n"
                 block = (
                     "{\n"
-                    f"{eval_line}  let value = sim.{handle_field}.get_{method_suffix}();\n"
+                    f"{eval_line}  let value = "
+                    f"sim.{handle_field}.get_{method_suffix}();\n"
                     f"  ValueCastTo::<{rust_ty}>::cast(&value)\n"
                     "}"
                 )
@@ -398,16 +404,26 @@ assert!(cond.count_ones() == 1, \"Select1Hot: condition is not 1-hot\");''']
             elif intrinsic == Intrinsic.SEND_READ_REQUEST:
                 idx = node.args[0]
                 idx_val = dump_rval_ref(self.module_ctx, self.sys, idx)
-                code.append(f"""{{
+                code.append(
+                    f"""{{
                     unsafe {{
                         let mem_interface = &sim.mem_interface;
-                        let success = mem_interface.send_request({idx_val} as i64, false, rust_callback, sim as *const _ as *mut _,);
+                        let success = mem_interface.send_request(
+                            {idx_val} as i64,
+                            false,
+                            rust_callback,
+                            sim as *const _ as *mut _,
+                        );
                         if success {{
-                            sim.request_stamp_map_table.insert({idx_val} as i64, sim.stamp);
+                            sim.request_stamp_map_table.insert(
+                                {idx_val} as i64,
+                                sim.stamp,
+                            );
                         }}
                         success
                     }}
-                }}""")
+                }}"""
+                )
 
             elif intrinsic == Intrinsic.SEND_WRITE_REQUEST:
                 idx = node.args[0]
@@ -415,17 +431,24 @@ assert!(cond.count_ones() == 1, \"Select1Hot: condition is not 1-hot\");''']
                 idx_val = dump_rval_ref(self.module_ctx, self.sys, idx)
                 we_val = dump_rval_ref(self.module_ctx, self.sys, we)
                 val = dump_rval_ref(self.module_ctx, self.sys, node)
-                code.append(f"""
+                code.append(
+                    f"""
                     let {val} = unsafe {{
                         if {we_val} {{
                             let mem_interface = &sim.mem_interface;
-                            let success = mem_interface.send_request({idx_val} as i64, true, rust_callback, sim as *const _ as *mut _,);
+                            let success = mem_interface.send_request(
+                                {idx_val} as i64,
+                                true,
+                                rust_callback,
+                                sim as *const _ as *mut _,
+                            );
                             success
                         }} else {{
                             false
                         }}
                     }};
-                """)
+                """
+                )
             elif intrinsic == Intrinsic.USE_DRAM:
                 fifo = node.args[0]
                 fifo_id = fifo_name(fifo)
@@ -437,14 +460,19 @@ assert!(cond.count_ones() == 1, \"Select1Hot: condition is not 1-hot\");''']
                     code.append(f"let {val} = false")
                 else:
                     mem_rdata = self.modules_for_callback["MemUser_rdata"]
-                    code.append(f"let {val} = sim.{mem_rdata}.payload.is_empty() == false")
+                    code.append(
+                        f"let {val} = sim.{mem_rdata}.payload.is_empty() == false"
+                    )
             elif intrinsic == Intrinsic.MEM_RESP:
                 val = dump_rval_ref(self.module_ctx, self.sys, node)
                 if not self.modules_for_callback.get("MemUser_rdata"):
                     code.append(f"let {val} = 0")
                 else:
                     mem_rdata = self.modules_for_callback["MemUser_rdata"]
-                    code.append(f"let {val} = sim.{mem_rdata}.payload.front().unwrap().clone()")
+                    code.append(
+                        f"let {val} = "
+                        f"sim.{mem_rdata}.payload.front().unwrap().clone()"
+                    )
 
             elif intrinsic == Intrinsic.MEM_WRITE:
                 array = node.args[0]
@@ -457,11 +485,20 @@ assert!(cond.count_ones() == 1, \"Select1Hot: condition is not 1-hot\");''']
                 self.modules_for_callback["memory"] = module_writer
                 self.modules_for_callback["store"] = array_name
                 port_id = id("DRAM")
-                code.append(f"""{{
+                code.append(
+                    f"""{{
                     let stamp = sim.stamp - sim.stamp % 100 + 50;
                     sim.{array_name}.write_port.push(
-                        ArrayWrite::new(stamp, {idx_val} as usize, {value_val}.clone(), "{module_writer}", {port_id}));
-                }}""")
+                        ArrayWrite::new(
+                            stamp,
+                            {idx_val} as usize,
+                            {value_val}.clone(),
+                            "{module_writer}",
+                            {port_id},
+                        ),
+                    );
+                }}"""
+                )
 
         # Format the result with proper indentation and variable assignment
         indent_str = " " * self.indent
