@@ -3,6 +3,7 @@
 # import timeit
 import os
 import subprocess
+import sys
 import re
 
 def identifierize(obj):
@@ -24,6 +25,7 @@ def unwrap_operand(node):
     return node
 
 PATH_CACHE = None
+VERILATOR_CACHE = None
 
 def repo_path():
     '''Get the path to assassyn repository'''
@@ -38,7 +40,9 @@ def package_path():
     return repo_path() + '/python/assassyn'
 
 def _cmd_wrapper(cmd):
-    return subprocess.check_output(cmd).decode('utf-8')
+    env = os.environ.copy()
+    env.pop('RUSTC_WRAPPER', None)  # sccache fails under some sandboxed runners
+    return subprocess.check_output(cmd, env=env).decode('utf-8')
 
 def patch_fifo(file_path):
     """
@@ -59,14 +63,25 @@ def patch_fifo(file_path):
 
 def run_simulator(manifest_path, offline=False, release=True):
     '''The helper function to run the simulator'''
-    cmd = ['cargo', 'run', '--manifest-path', manifest_path]
-    if offline:
-        cmd += ['--offline']
-    if release:
-        cmd += ['--release']
-    print(cmd)
-    res = _cmd_wrapper(cmd)
-    return res
+
+    def _run(off):
+        cmd = ['cargo', 'run', '--manifest-path', manifest_path]
+        if off:
+            cmd += ['--offline']
+        if release:
+            cmd += ['--release']
+        print(cmd)
+        return _cmd_wrapper(cmd)
+
+    try:
+        return _run(offline)
+    except subprocess.CalledProcessError as err:
+        if offline:
+            raise
+        try:
+            return _run(True)
+        except subprocess.CalledProcessError:
+            raise err
 
 def run_verilator(path):
     '''The helper function to run the verilator'''
@@ -90,11 +105,32 @@ def parse_simulator_cycle(toks):
     return int(toks[2][1:-4])
 
 def has_verilator():
-    '''Returns the path to Verilator or None if VERILATOR_ROOT is not set'''
+    '''Returns the path to Verilator or None if dependencies are missing'''
+    # pylint: disable=global-statement
+    global VERILATOR_CACHE
+    if VERILATOR_CACHE is not None:
+        return VERILATOR_CACHE
+
     verilator_root = os.environ.get('VERILATOR_ROOT')
-    if verilator_root and os.path.isdir(verilator_root):
-        return 'verilator'
-    return None
+    if not (verilator_root and os.path.isdir(verilator_root)):
+        VERILATOR_CACHE = None
+        return VERILATOR_CACHE
+
+    env = os.environ.copy()
+    env.pop('RUSTC_WRAPPER', None)
+    try:
+        subprocess.run(
+            [sys.executable, '-c', 'import pycde'],
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        VERILATOR_CACHE = None
+    else:
+        VERILATOR_CACHE = 'verilator'
+    return VERILATOR_CACHE
 
 def create_and_clean_dir(dir_path: str):
     """Create a directory and clear its contents if it already exists."""
