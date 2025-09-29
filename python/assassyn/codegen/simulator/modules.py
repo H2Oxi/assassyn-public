@@ -34,6 +34,7 @@ from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
 from ...ir.module.external import ExternalSV
 from .external import external_handle_field
+from ...ir.module.downstream import Downstream
 
 if typing.TYPE_CHECKING:
     from ...ir.module import Module
@@ -50,11 +51,27 @@ class ElaborateModule(Visitor):
         self.module_ctx = None
         self.modules_for_callback = {}
         self.external_specs = getattr(sys, '_external_ffi_specs', {})
+        self.current_external_modules: set[str] = set()
+        self.pending_eval: dict[str, bool] = {}
+
+    def _lookup_external_port(self, module_name: str, wire_name: str, direction: str):
+        """Return the FFI port spec for the given external wire, if available."""
+        spec = self.external_specs.get(module_name)
+        if spec is None:
+            return None
+        target = namify(wire_name)
+        ports = spec.inputs if direction == 'input' else spec.outputs
+        for port in ports:
+            if port.name == target:
+                return port
+        return None
 
     def visit_module_for_callback(self, node: Module):
         """Visit a module to collect module names for callback."""
         self.module_name = node.name
         self.module_ctx = node
+        self.current_external_modules = set()
+        self.pending_eval = {}
         self.visit_block(node.body)
         return self.modules_for_callback
 
@@ -62,6 +79,8 @@ class ElaborateModule(Visitor):
         """Visit a module and generate its implementation."""
         self.module_name = node.name
         self.module_ctx = node
+        self.current_external_modules = set()
+        self.pending_eval = {}
 
         if isinstance(node, ExternalSV):
             # External modules are handled by dedicated FFI glue instead of simulator stubs.
@@ -77,6 +96,15 @@ class ElaborateModule(Visitor):
         # Visit the module body
         body = self.visit_block(node.body)
         result.append(body)
+
+        if isinstance(node, Downstream) and self.current_external_modules:
+            indent_str = " " * self.indent
+            for ext_module in sorted(self.current_external_modules):
+                spec = self.external_specs.get(ext_module)
+                if spec is None or not getattr(spec, 'has_clock', False):
+                    continue
+                handle_field = external_handle_field(ext_module)
+                result.append(f"{indent_str}sim.{handle_field}.clock_tick();")
 
         # Decrease indentation and add function closing
         self.indent -= 2
@@ -270,16 +298,23 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
             module_writer = namify(self.module_name)
 
             if isinstance(owner, ExternalSV) and wire_name:
-                fifo_id = f"{namify(owner.name)}_{namify(wire_name)}"
-                rust_ty = dtype_to_rust_type(wire.dtype)
-                code.append(f"// External wire assign: {owner.name}.{wire_name} = {{value}}".replace("{value}", value))
+                port_spec = self._lookup_external_port(owner.name, wire_name, 'input')
+                rust_ty = port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
+                handle_field = external_handle_field(owner.name)
+                method_suffix = namify(wire_name)
+                casted_value = f"ValueCastTo::<{rust_ty}>::cast(&{value})"
                 code.append(
-                    f"{{\n  let stamp = sim.stamp;\n  let data = ValueCastTo::<{rust_ty}>::cast(&{value});\n  sim.{fifo_id}.push.push(FIFOPush::new(stamp + 50, data, \"{module_writer}\"));\n}}"
+                    f"// External wire assign: {owner.name}.{wire_name} = {{value}}".replace(
+                        "{value}", value
+                    )
                 )
-                event_queue = f"{namify(owner.name)}_event"
                 code.append(
-                    f"{{\n  let stamp = sim.stamp - sim.stamp % 100 + 100;\n  sim.{event_queue}.push_back(stamp)\n}}"
+                    f"sim.{handle_field}.set_{method_suffix}({casted_value});"
                 )
+                self.current_external_modules.add(owner.name)
+                spec = self.external_specs.get(owner.name)
+                if spec is not None and not getattr(spec, 'has_clock', False):
+                    self.pending_eval[owner.name] = True
             else:
                 expr_repr = node.__repr__()
                 code.append(f"/* TODO: unsupported wire assign {expr_repr} */")
@@ -291,14 +326,23 @@ let mask = BigUint::parse_bytes("{mask_bits}".as_bytes(), 2).unwrap();'''
             expr_repr = node.__repr__()
 
             if isinstance(owner, ExternalSV) and wire_name:
-                fifo_id = f"{namify(owner.name)}_{namify(wire_name)}"
-                module_writer = namify(self.module_name)
                 rust_ty = dtype_to_rust_type(node.dtype)
-                ready_var = f"{namify(node.as_operand())}_ready"
+                handle_field = external_handle_field(owner.name)
+                method_suffix = namify(wire_name)
                 code.append(f"/* External wire read: {owner.name}.{wire_name} */")
-                code.append(
-                    f"{{\n  let {ready_var} = !sim.{fifo_id}.is_empty();\n  if !{ready_var} {{\n    return false;\n  }}\n  let raw = {{\n    let stamp = sim.stamp - sim.stamp % 100 + 50;\n    sim.{fifo_id}.pop.push(FIFOPop::new(stamp, \"{module_writer}\"));\n    match sim.{fifo_id}.payload.front() {{\n      Some(value) => value.clone(),\n      None => return false,\n    }}\n  }};\n  ValueCastTo::<{rust_ty}>::cast(&raw)\n}}"
+                spec = self.external_specs.get(owner.name)
+                eval_line = ""
+                if spec is not None and not getattr(spec, 'has_clock', False):
+                    if self.pending_eval.pop(owner.name, False):
+                        eval_line = f"  sim.{handle_field}.eval();\n"
+                block = (
+                    "{\n"
+                    f"{eval_line}  let value = sim.{handle_field}.get_{method_suffix}();\n"
+                    f"  ValueCastTo::<{rust_ty}>::cast(&value)\n"
+                    "}"
                 )
+                code.append(block)
+                self.current_external_modules.add(owner.name)
             else:
                 code.append(f"panic!(\"Unsupported external wire read: {expr_repr}\")")
 
