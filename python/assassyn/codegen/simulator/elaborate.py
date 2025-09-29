@@ -20,7 +20,7 @@ if typing.TYPE_CHECKING:
 
 
 def _resolve_workspace_paths(sys: "SysBuilder", config: dict[str, typing.Any]):
-    """Return the workspace root and derived output paths."""
+    """Return workspace root and derived simulator/verilator paths."""
 
     workspace_root = Path(config.get('path', os.getcwd()))
     simulator_dirname = (

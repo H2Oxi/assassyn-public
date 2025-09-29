@@ -37,7 +37,7 @@ class FFIPort:
 
 
 @dataclass
-class ExternalFFIModule:
+class ExternalFFIModule:  # pylint: disable=too-many-instance-attributes
     """Artifacts emitted for a single ExternalSV module."""
 
     crate_name: str
@@ -144,6 +144,7 @@ def _generate_build_rs(crate: ExternalFFIModule) -> str:
 
 
 def _generate_lib_rs(crate: ExternalFFIModule) -> str:
+    # pylint: disable=too-many-branches, too-many-statements
     struct_name = camelize(crate.symbol_prefix) or "ExternalModule"
     struct_name = struct_name[0].upper() + struct_name[1:]
     crate.struct_name = struct_name
@@ -164,13 +165,19 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
             f"        pub fn {prefix}_set_rst(handle: *mut ModuleHandle, value: u8);"
         )
     for port in crate.inputs:
-        raw_mod_lines.append(
-            f"        pub fn {prefix}_set_{port.name}(handle: *mut ModuleHandle, value: {port.rust_type});"
+        signature = (
+            f"        pub fn {prefix}_set_{port.name}("
+            "handle: *mut ModuleHandle, value: "
+            f"{port.rust_type});"
         )
+        raw_mod_lines.append(signature)
     for port in crate.outputs:
-        raw_mod_lines.append(
-            f"        pub fn {prefix}_get_{port.name}(handle: *mut ModuleHandle) -> {port.rust_type};"
+        signature = (
+            f"        pub fn {prefix}_get_{port.name}("
+            "handle: *mut ModuleHandle) -> "
+            f"{port.rust_type};"
         )
+        raw_mod_lines.append(signature)
     raw_mod_lines.append("    }")
     raw_mod_lines.append("}")
 
@@ -206,7 +213,8 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
     impl_lines.append("    }")
     impl_lines.append("")
     impl_lines.append(
-        f"    pub fn eval(&mut self) {{ unsafe {{ raw::{prefix}_eval(self.ptr) }} }}"
+        "    pub fn eval(&mut self) { unsafe { "
+        f"raw::{prefix}_eval(self.ptr) }}"
     )
     if crate.has_clock or crate.has_reset:
         impl_lines.append("")
@@ -274,12 +282,20 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
             )
     for port in crate.inputs:
         impl_lines.append(
-            f"    pub fn set_{port.name}(&mut self, value: {port.rust_type}) {{ unsafe {{ raw::{prefix}_set_{port.name}(self.ptr, value) }} }}"
+            f"    pub fn set_{port.name}(&mut self, value: {port.rust_type}) {{"
         )
+        impl_lines.append(
+            f"        unsafe {{ raw::{prefix}_set_{port.name}(self.ptr, value) }}"
+        )
+        impl_lines.append("    }")
     for port in crate.outputs:
         impl_lines.append(
-            f"    pub fn get_{port.name}(&mut self) -> {port.rust_type} {{ unsafe {{ raw::{prefix}_get_{port.name}(self.ptr) }} }}"
+            f"    pub fn get_{port.name}(&mut self) -> {port.rust_type} {{"
         )
+        impl_lines.append(
+            f"        unsafe {{ raw::{prefix}_get_{port.name}(self.ptr) }}"
+        )
+        impl_lines.append("    }")
     impl_lines.append("}")
     impl_lines.append("")
 
@@ -328,20 +344,36 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
         f"void {prefix}_eval(ModuleHandle* handle) {{ handle->eval(); }}",
     ]
     if crate.has_clock:
-        lines.append(
-            f"void {prefix}_set_clk(ModuleHandle* handle, uint8_t value) {{ handle->clk = static_cast<uint8_t>(value & 0x1U); }}"
+        lines.extend(
+            [
+                f"void {prefix}_set_clk(ModuleHandle* handle, uint8_t value) {{",
+                "    handle->clk = static_cast<uint8_t>(value & 0x1U);",
+                "}",
+            ]
         )
     if crate.has_reset:
-        lines.append(
-            f"void {prefix}_set_rst(ModuleHandle* handle, uint8_t value) {{ handle->rst = static_cast<uint8_t>(value & 0x1U); }}"
+        lines.extend(
+            [
+                f"void {prefix}_set_rst(ModuleHandle* handle, uint8_t value) {{",
+                "    handle->rst = static_cast<uint8_t>(value & 0x1U);",
+                "}",
+            ]
         )
     for port in crate.inputs:
-        lines.append(
-            f"void {prefix}_set_{port.name}(ModuleHandle* handle, {port.c_type} value) {{ handle->{port.name} = static_cast<{port.c_type}>(value); }}"
+        lines.extend(
+            [
+                f"void {prefix}_set_{port.name}(ModuleHandle* handle, {port.c_type} value) {{",
+                f"    handle->{port.name} = static_cast<{port.c_type}>(value);",
+                "}",
+            ]
         )
     for port in crate.outputs:
-        lines.append(
-            f"{port.c_type} {prefix}_get_{port.name}(ModuleHandle* handle) {{ return static_cast<{port.c_type}>(handle->{port.name}); }}"
+        lines.extend(
+            [
+                f"{port.c_type} {prefix}_get_{port.name}(ModuleHandle* handle) {{",
+                f"    return static_cast<{port.c_type}>(handle->{port.name});",
+                "}",
+            ]
         )
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -353,6 +385,8 @@ def generate_external_sv_crates(
     verilator_root: Path,
 ) -> List[ExternalFFIModule]:
     """Generate Verilator FFI crates for the provided ExternalSV modules."""
+
+    # pylint: disable=too-many-locals, too-many-statements
 
     specs: List[ExternalFFIModule] = []
     used_crate_names: Dict[str, int] = {}
