@@ -22,7 +22,7 @@ if typing.TYPE_CHECKING:
 
 
 class ElaborateModule(Visitor):
-    """Visitor for elaborating modules with multi-port write support."""
+    """Visitor for elaborating modules with ExternalSV support."""
 
     def __init__(
         self,
@@ -150,6 +150,7 @@ class ElaborateModule(Visitor):
             if code:
                 indent_str = " " * self.indent
                 return f"{indent_str}{code}\n"
+            return ""
 
         custom_code = None
         if isinstance(node, WireRead):
