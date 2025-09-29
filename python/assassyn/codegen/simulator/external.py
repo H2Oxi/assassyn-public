@@ -213,8 +213,7 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
     impl_lines.append("    }")
     impl_lines.append("")
     impl_lines.append(
-        "    pub fn eval(&mut self) { unsafe { "
-        f"raw::{prefix}_eval(self.ptr) }}"
+        f"    pub fn eval(&mut self) {{ unsafe {{ raw::{prefix}_eval(self.ptr) }} }}"
     )
     if crate.has_clock or crate.has_reset:
         impl_lines.append("")
