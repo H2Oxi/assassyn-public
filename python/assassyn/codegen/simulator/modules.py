@@ -30,7 +30,6 @@ class ElaborateModule(Visitor):
         callback_metadata: CallbackMetadata | None = None,
         external_specs: dict[str, typing.Any] | None = None,
     ):
-        """Initialize the module elaborator."""
         super().__init__()
         self.sys = sys
         self.indent = 0
@@ -38,6 +37,7 @@ class ElaborateModule(Visitor):
         self.module_ctx = None
         self.callback_metadata = callback_metadata
         self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
+        self.current_external_modules: set[str] = set()
         self.pending_eval: dict[str, bool] = {}
 
     def _lookup_external_port(self, module_name: str, wire_name: str, direction: str):
@@ -57,24 +57,28 @@ class ElaborateModule(Visitor):
         """Visit a module and generate its implementation."""
         self.module_name = node.name
         self.module_ctx = node
+        self.current_external_modules = set()
         self.pending_eval = {}
 
         if isinstance(node, ExternalSV):
-            # External modules are handled by dedicated FFI glue instead of simulator stubs.
-            return ""
+            return self.visit_external_module(node)
 
-        # Create function header
         result = [f"\n// Elaborating module {self.module_name}"]
         result.append(f"pub fn {namify(self.module_name)}(sim: &mut Simulator) -> bool {{")
 
-        # Increase indentation for function body
         self.indent += 2
-
-        # Visit the module body
         body = self.visit_block(node.body)
         result.append(body)
 
-        # Decrease indentation and add function closing
+        if self.current_external_modules:
+            indent_str = " " * self.indent
+            for ext_module in sorted(self.current_external_modules):
+                spec = self.external_specs.get(ext_module)
+                if spec is None or not getattr(spec, "has_clock", False):
+                    continue
+                handle_field = external_handle_field(ext_module)
+                result.append(f"{indent_str}sim.{handle_field}.clock_tick();")
+
         self.indent -= 2
         result.append(" true }")
 
@@ -89,19 +93,19 @@ class ElaborateModule(Visitor):
 
         spec = self.external_specs.get(owner.name)
         if spec is None:
-            return f"/* Missing external spec for {owner.name}.{wire_name} */"
+            raise ValueError(f"Missing external FFI spec for module {owner.name}")
 
         port_spec = self._lookup_external_port(owner.name, wire_name, "input")
         rust_ty = (
-            port_spec.rust_type
-            if port_spec is not None
-            else dtype_to_rust_type(wire.dtype)
+            port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
         )
         value = dump_rval_ref(self.module_ctx, self.sys, node.value)
         handle_field = external_handle_field(owner.name)
         method_suffix = namify(wire_name)
 
-        self.pending_eval[owner.name] = True
+        self.current_external_modules.add(owner.name)
+        if not getattr(spec, "has_clock", False):
+            self.pending_eval[owner.name] = True
 
         return (
             f"// External wire assign: {owner.name}.{wire_name}\n"
@@ -116,21 +120,19 @@ class ElaborateModule(Visitor):
         if not isinstance(owner, ExternalSV) or not wire_name:
             return None
 
+        spec = self.external_specs.get(owner.name)
+        if spec is None:
+            raise ValueError(f"Missing external FFI spec for module {owner.name}")
+
         handle_field = external_handle_field(owner.name)
         method_suffix = namify(wire_name)
         rust_ty = dtype_to_rust_type(node.dtype)
-        eval_line = ""
-        spec = self.external_specs.get(owner.name)
-        if spec is None:
-            return (
-                "{\n"
-                f"  let value = sim.{handle_field}.get_{method_suffix}();\n"
-                f"  ValueCastTo::<{rust_ty}>::cast(&value)\n"
-                "}"
-            )
 
-        if self.pending_eval.pop(owner.name, False):
+        eval_line = ""
+        if not getattr(spec, "has_clock", False) and self.pending_eval.pop(owner.name, False):
             eval_line = f"  sim.{handle_field}.eval();\n"
+
+        self.current_external_modules.add(owner.name)
 
         return (
             "{\n"
@@ -141,25 +143,23 @@ class ElaborateModule(Visitor):
 
     def visit_expr(self, node: Expr):
         """Visit an expression and generate its implementation."""
-        # pylint: disable=import-outside-toplevel
-        from ._expr import codegen_expr
+        from ._expr import codegen_expr  # pylint: disable=import-outside-toplevel
 
         if isinstance(node, WireAssign):
             code = self._codegen_external_wire_assign(node)
-            if not code:
-                return ""
-            indent_str = " " * self.indent
-            return f"{indent_str}{code}\n"
+            if code:
+                indent_str = " " * self.indent
+                return f"{indent_str}{code}\n"
+
+        custom_code = None
+        if isinstance(node, WireRead):
+            custom_code = self._codegen_external_wire_read(node)
 
         id_and_exposure = None
         if node.is_valued():
             need_exposure = expr_externally_used(node, True)
             id_expr = namify(node.as_operand())
             id_and_exposure = (id_expr, need_exposure)
-
-        custom_code = None
-        if isinstance(node, WireRead):
-            custom_code = self._codegen_external_wire_read(node)
 
         kwargs = {}
         if (
@@ -196,17 +196,14 @@ class ElaborateModule(Visitor):
         return result
 
     def visit_int_imm(self, int_imm):
-        """Visit an integer immediate value."""
         ty = dump_rval_ref(self.module_ctx, self.sys, int_imm.dtype)
         value = int_imm.value
         return f"ValueCastTo::<{ty}>::cast(&{value})"
 
     def visit_block(self, node: Block):
-        """Visit a block and generate its implementation."""
         result = []
         visited = set()
 
-        # Save current indentation
         restore_indent = self.indent
 
         if isinstance(node, CondBlock):
@@ -217,7 +214,6 @@ class ElaborateModule(Visitor):
             result.append(f"if sim.stamp / 100 == {node.cycle} {{\n")
             self.indent += 2
 
-        # Visit each element in the block
         for elem in node.iter():
             elem_id = id(elem)
             if elem_id in visited:
@@ -232,7 +228,6 @@ class ElaborateModule(Visitor):
             else:
                 raise ValueError(f"Unexpected reference type: {type(elem).__name__}")
 
-        # Restore indentation and close scope if needed
         if restore_indent != self.indent:
             self.indent -= 2
             result.append(f"{' ' * self.indent}}}\n")
@@ -240,11 +235,9 @@ class ElaborateModule(Visitor):
         return "".join(result)
 
     def visit_external_module(self, node: ExternalSV):
-        """Generate simulator implementation for an ExternalSV module."""
-
         module_id = namify(node.name)
         return (
-            f"\n// External module {node.name} is driven via generated FFI wrappers\n"
+            f"\n// External module {node.name} is driven via FFI handles\n"
             f"pub fn {module_id}(sim: &mut Simulator) -> bool {{\n"
             "    let _ = sim;\n"
             "    true\n"
