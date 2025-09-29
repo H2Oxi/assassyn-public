@@ -37,4 +37,15 @@ And the code below is what I want you generate.
   sim.ExternalAdder_2aad2_ffi.set_a(ValueCastTo::<u32>::cast(&tmp_a_1));
 ```
 
+- Step 4:
+Now we will add a special generation part only for the externalSV.
+First, we just assume all the ExternalSV will do the instantiation under one downstream module. 
+And in such situation, if it has clocks, we will dump the code below at the end of this downstream module in `module.rs`, 
 
+```
+  sim.ExternalAdder_2aad2_ffi.clock_tick();
+```
+else if it has no clocks, we will dump the code below just after setting all the inputs and before getting all the outputs in this downstream module in `module.rs`, generate:
+```
+  sim.ExternalAdder_2aad2_ffi.eval();
+```
