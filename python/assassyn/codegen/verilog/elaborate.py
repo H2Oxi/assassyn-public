@@ -103,7 +103,7 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
     create_and_clean_dir(path)
 
     external_sources = set()
-    for module in sys.modules:
+    for module in sys.modules + sys.downstreams:
         if isinstance(module, ExternalSV) and getattr(module, 'file_path', None):
             external_sources.add(module.file_path)
 

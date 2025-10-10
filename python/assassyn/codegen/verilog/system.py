@@ -97,6 +97,8 @@ def generate_system(dumper, node):
         dumper.visit_module(elem)
     dumper.current_module = None
     for elem in sys.downstreams:
+        if dumper._is_external_module(elem):
+            continue
         dumper.current_module = elem
         dumper.visit_module(elem)
     dumper.current_module = None
