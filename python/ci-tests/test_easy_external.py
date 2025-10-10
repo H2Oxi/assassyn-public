@@ -1,7 +1,6 @@
 from assassyn.frontend import *
 from assassyn.backend import elaborate
 from assassyn import utils
-from assassyn.ir.module.external import ExternalSV
 
 
 class Driver(Module):
@@ -29,28 +28,16 @@ class ForwardData(Module):
         data = self.pop_all_ports(True)
         return data
 
+@external
 class ExternalAdder(ExternalSV):
     '''External SystemVerilog adder module.'''
 
-    def __init__(self, **in_wire_connections):
-        super().__init__(
-            file_path="python/ci-tests/resources/adder.sv",
-            module_name="adder",
-            in_wires={
-                'a': UInt(32),
-                'b': UInt(32),
-            },
-            out_wires={
-                'c': UInt(32),
-            },
-            **in_wire_connections
-        )
+    a: Input[UInt(32)]
+    b: Input[UInt(32)]
+    c: Output[UInt(32)]
 
-    def __getattr__(self, name):
-        # Allow accessing output wires as attributes
-        if hasattr(self, 'out_wires') and name in self.out_wires:
-            return self.out_wires[name]
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+    __source__: str = "python/ci-tests/resources/adder.sv"
+    __module_name__: str = "adder"
 
 
 class Adder(Downstream):
@@ -64,10 +51,8 @@ class Adder(Downstream):
         a = a.optional(UInt(32)(1))
         b = b.optional(UInt(32)(1))
 
-        # Instantiate the external adder module and capture its single output
-        c = ext_adder.in_assign(a=a, b=b)
-
-        log("downstream: {} + {} = {}", a, b, c)
+        ext_adder.in_assign(a=a, b=b)
+        log("downstream: {} + {} = {}", a, b, ext_adder.c)
 
 
 def test_easy_external():
