@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from ...ir.module.external import ExternalSV
 from ...ir.module.module import Wire
@@ -19,9 +22,6 @@ _C_INT_TYPES_UNSIGNED = {8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint
 _C_INT_TYPES_SIGNED = {8: "int8_t", 16: "int16_t", 32: "int32_t", 64: "int64_t"}
 _RUST_INT_TYPES_UNSIGNED = {8: "u8", 16: "u16", 32: "u32", 64: "u64"}
 _RUST_INT_TYPES_SIGNED = {8: "i8", 16: "i16", 32: "i32", 64: "i64"}
-
-_BUILD_RS_TEMPLATE_PATH = Path(__file__).with_name("build_rs_template.rs")
-
 
 @dataclass
 class FFIPort:
@@ -54,6 +54,8 @@ class ExternalFFIModule:  # pylint: disable=too-many-instance-attributes
     original_module_name: str = ""
     struct_name: str = ""
     definitions: Dict[str, str] = field(default_factory=dict)
+    lib_filename: str = ""
+    lib_path: Optional[Path] = None
 
 
 def _storage_width(bits: int) -> int:
@@ -112,136 +114,172 @@ def _write_file(path: Path, content: str) -> None:
     path.write_text(content, encoding='utf-8')
 
 
+def _dynamic_lib_suffix() -> str:
+    system = platform.system().lower()
+    if system == "windows":
+        return ".dll"
+    if system == "darwin":
+        return ".dylib"
+    return ".so"
+
+
+def _compiler_command() -> List[str]:
+    compiler_env = os.environ.get("CXX")
+    if compiler_env:
+        tokens = shlex.split(compiler_env)
+        if tokens:
+            return tokens
+    for candidate in ("clang++", "g++", "c++"):
+        path = shutil.which(candidate)
+        if path:
+            return [path]
+    raise RuntimeError(
+        "Unable to locate a C++ compiler. Set the CXX environment variable or install clang++/g++."
+    )
+
+
+def _run_subprocess(cmd: List[str], cwd: Path | None = None) -> None:
+    subprocess.run(cmd, check=True, cwd=cwd, env=os.environ.copy())
+
+
 def _generate_cargo_toml(crate: ExternalFFIModule) -> str:
     return f"""[package]
 name = \"{crate.crate_name}\"
 version = \"0.1.0\"
 edition = \"2021\"
-links = \"{crate.dynamic_lib_name}\"
-
 [dependencies]
-
-[build-dependencies]
-cc = \"1\"
+libloading = \"0.8\"
 """
 
 
-def _generate_build_rs(crate: ExternalFFIModule) -> str:
-    top_module = crate.top_module
-    cpp_class = f"V{top_module}"
-    sv_rel_path = crate.sv_rel_path.replace('\\', '/')
-    dynlib = crate.dynamic_lib_name
-    aggregated = f"{cpp_class}__ALL.cpp"
-    template = _BUILD_RS_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return (
-        template
-        .replace("__SV_PATH__", sv_rel_path)
-        .replace("__TOP_MODULE__", top_module)
-        .replace("__AGGREGATED__", aggregated)
-        .replace("__DYNLIB__", dynlib)
-    )
-
-
-
 def _generate_lib_rs(crate: ExternalFFIModule) -> str:
-    # pylint: disable=too-many-branches, too-many-statements
+    # pylint: disable=too-many-branches, too-many-locals, too-many-statements
     struct_name = camelize(crate.symbol_prefix) or "ExternalModule"
     struct_name = struct_name[0].upper() + struct_name[1:]
     crate.struct_name = struct_name
-    raw_mod_lines = ["pub mod raw {", "    use super::ModuleHandle;"]
     prefix = crate.symbol_prefix
-    raw_mod_lines.extend([
-        "    extern \"C\" {",
-        f"        pub fn {prefix}_new() -> *mut ModuleHandle;",
-        f"        pub fn {prefix}_free(handle: *mut ModuleHandle);",
-        f"        pub fn {prefix}_eval(handle: *mut ModuleHandle);",
-    ])
-    if crate.has_clock:
-        raw_mod_lines.append(
-            f"        pub fn {prefix}_set_clk(handle: *mut ModuleHandle, value: u8);"
-        )
-    if crate.has_reset:
-        raw_mod_lines.append(
-            f"        pub fn {prefix}_set_rst(handle: *mut ModuleHandle, value: u8);"
-        )
-    for port in crate.inputs:
-        signature = (
-            f"        pub fn {prefix}_set_{port.name}("
-            "handle: *mut ModuleHandle, value: "
-            f"{port.rust_type});"
-        )
-        raw_mod_lines.append(signature)
-    for port in crate.outputs:
-        signature = (
-            f"        pub fn {prefix}_get_{port.name}("
-            "handle: *mut ModuleHandle) -> "
-            f"{port.rust_type};"
-        )
-        raw_mod_lines.append(signature)
-    raw_mod_lines.append("    }")
-    raw_mod_lines.append("}")
 
-    struct_lines = [
-        "#[allow(dead_code)]",
+    lines = [
+        "#![allow(dead_code)]",
+        "use libloading::Library;",
+        "use std::path::{Path, PathBuf};",
+        "use std::ptr::NonNull;",
+        "",
+        "#[repr(C)]",
+        "#[allow(non_camel_case_types)]",
+        "pub struct ModuleHandle { _private: [u8; 0] }",
+        "",
+        "const LIB_PATH: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/.verilator-lib-path\"));",
+        "",
+        "fn lib_path() -> PathBuf {",
+        "    PathBuf::from(LIB_PATH.trim())",
+        "}",
+        "",
+        "fn load_library<P: AsRef<Path>>(path: P) -> Library {",
+        "    let path = path.as_ref();",
+        f"    unsafe {{ Library::new(path) }}.unwrap_or_else(|err| panic!(\"failed to load Verilator library '{prefix}': {{err}} ({{}})\", path.display()))",
+        "}",
+        "",
+        "unsafe fn load_symbol<T: Copy>(lib: &Library, symbol: &[u8], name: &str) -> T {",
+        "    *lib.get::<T>(symbol).unwrap_or_else(|err| panic!(\"failed to load symbol {name}: {err}\"))",
+        "}",
+        "",
         f"pub struct {struct_name} {{",
-        "    ptr: *mut ModuleHandle,",
+        "    lib: Library,",
+        "    handle: NonNull<ModuleHandle>,",
+        "    free_fn: unsafe extern \"C\" fn(*mut ModuleHandle),",
+        "    eval_fn: unsafe extern \"C\" fn(*mut ModuleHandle),",
     ]
+
     if crate.has_clock:
-        struct_lines.append("    clk_state: u8,")
+        lines.append("    set_clk_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8),")
+        lines.append("    clk_state: u8,")
     if crate.has_reset:
-        struct_lines.append("    rst_state: u8,")
-    struct_lines.append("}")
-    struct_lines.append("")
+        lines.append("    set_rst_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8),")
+        lines.append("    rst_state: u8,")
+    for port in crate.inputs:
+        lines.append(
+            f"    set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, {port.rust_type}),"
+        )
+    for port in crate.outputs:
+        lines.append(
+            f"    get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> {port.rust_type},"
+        )
+    lines.append("}")
+    lines.append("")
 
     impl_lines = [
         f"impl {struct_name} {{",
         "    pub fn new() -> Self {",
-        f"        let ptr = unsafe {{ raw::{prefix}_new() }};",
-        f"        assert!(!ptr.is_null(), \"{prefix}_new returned null\");",
+        "        let path = lib_path();",
+        "        Self::new_from_path(path)",
+        "    }",
+        "",
+        "    pub fn new_from_path<P: AsRef<Path>>(path: P) -> Self {",
+        "        let lib = load_library(path);",
+        "        unsafe {",
+        f"            let new_fn: unsafe extern \"C\" fn() -> *mut ModuleHandle = load_symbol(&lib, b\"{prefix}_new\", \"{prefix}_new\");",
+        f"            let free_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = load_symbol(&lib, b\"{prefix}_free\", \"{prefix}_free\");",
+        f"            let eval_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = load_symbol(&lib, b\"{prefix}_eval\", \"{prefix}_eval\");",
     ]
+
     if crate.has_clock:
-        impl_lines.append(f"        unsafe {{ raw::{prefix}_set_clk(ptr, 0); }}")
+        impl_lines.append(
+            f"            let set_clk_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = load_symbol(&lib, b\"{prefix}_set_clk\", \"{prefix}_set_clk\");"
+        )
     if crate.has_reset:
-        impl_lines.append(f"        unsafe {{ raw::{prefix}_set_rst(ptr, 0); }}")
-    impl_lines.append("        Self {")
-    impl_lines.append("            ptr,")
+        impl_lines.append(
+            f"            let set_rst_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = load_symbol(&lib, b\"{prefix}_set_rst\", \"{prefix}_set_rst\");"
+        )
+    for port in crate.inputs:
+        impl_lines.append(
+            f"            let set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, {port.rust_type}) = load_symbol(&lib, b\"{prefix}_set_{port.name}\", \"{prefix}_set_{port.name}\");"
+        )
+    for port in crate.outputs:
+        impl_lines.append(
+            f"            let get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> {port.rust_type} = load_symbol(&lib, b\"{prefix}_get_{port.name}\", \"{prefix}_get_{port.name}\");"
+        )
+    impl_lines.append(
+        f"            let handle = NonNull::new(new_fn()).unwrap_or_else(|| panic!(\"{prefix}_new returned null\"));"
+    )
+    impl_lines.append("            let mut instance = Self {")
+    impl_lines.append("                lib,")
+    impl_lines.append("                handle,")
+    impl_lines.append("                free_fn,")
+    impl_lines.append("                eval_fn,")
     if crate.has_clock:
-        impl_lines.append("            clk_state: 0,")
+        impl_lines.append("                set_clk_fn,")
+        impl_lines.append("                clk_state: 0,")
     if crate.has_reset:
-        impl_lines.append("            rst_state: 0,")
+        impl_lines.append("                set_rst_fn,")
+        impl_lines.append("                rst_state: 0,")
+    for port in crate.inputs:
+        impl_lines.append(f"                set_{port.name}_fn,")
+    for port in crate.outputs:
+        impl_lines.append(f"                get_{port.name}_fn,")
+    impl_lines.append("            };")
+    if crate.has_clock:
+        impl_lines.append("            set_clk_fn(instance.handle.as_ptr(), 0);")
+    if crate.has_reset:
+        impl_lines.append("            set_rst_fn(instance.handle.as_ptr(), 0);")
+    impl_lines.append("            instance")
     impl_lines.append("        }")
     impl_lines.append("    }")
     impl_lines.append("")
     impl_lines.append(
-        f"    pub fn eval(&mut self) {{ unsafe {{ raw::{prefix}_eval(self.ptr) }} }}"
+        "    pub fn eval(&mut self) { unsafe { (self.eval_fn)(self.handle.as_ptr()) } }"
     )
-    if crate.has_clock or crate.has_reset:
-        impl_lines.append("")
+    impl_lines.append("")
+
     if crate.has_clock:
         impl_lines.extend(
             [
                 "    pub fn set_clock(&mut self, value: bool) {",
                 "        let value = value as u8;",
-                f"        unsafe {{ raw::{prefix}_set_clk(self.ptr, value) }};",
+                "        unsafe { (self.set_clk_fn)(self.handle.as_ptr(), value) };",
                 "        self.clk_state = value;",
                 "    }",
                 "",
-            ]
-        )
-    if crate.has_reset:
-        impl_lines.extend(
-            [
-                "    pub fn set_reset(&mut self, value: bool) {",
-                "        let value = value as u8;",
-                f"        unsafe {{ raw::{prefix}_set_rst(self.ptr, value) }};",
-                "        self.rst_state = value;",
-                "    }",
-                "",
-            ]
-        )
-    if crate.has_clock:
-        impl_lines.extend(
-            [
                 "    pub fn clock_tick(&mut self) {",
                 "        self.set_clock(false);",
                 "        self.eval();",
@@ -252,6 +290,16 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
             ]
         )
     if crate.has_reset:
+        impl_lines.extend(
+            [
+                "    pub fn set_reset(&mut self, value: bool) {",
+                "        let value = value as u8;",
+                "        unsafe { (self.set_rst_fn)(self.handle.as_ptr(), value) };",
+                "        self.rst_state = value;",
+                "    }",
+                "",
+            ]
+        )
         if crate.has_clock:
             impl_lines.extend(
                 [
@@ -279,43 +327,35 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
                     "",
                 ]
             )
+
     for port in crate.inputs:
-        impl_lines.append(
-            f"    pub fn set_{port.name}(&mut self, value: {port.rust_type}) {{"
+        impl_lines.extend(
+            [
+                f"    pub fn set_{port.name}(&mut self, value: {port.rust_type}) {{",
+                f"        unsafe {{ (self.set_{port.name}_fn)(self.handle.as_ptr(), value) }};",
+                "    }",
+                "",
+            ]
         )
-        impl_lines.append(
-            f"        unsafe {{ raw::{prefix}_set_{port.name}(self.ptr, value) }}"
-        )
-        impl_lines.append("    }")
     for port in crate.outputs:
-        impl_lines.append(
-            f"    pub fn get_{port.name}(&mut self) -> {port.rust_type} {{"
+        impl_lines.extend(
+            [
+                f"    pub fn get_{port.name}(&mut self) -> {port.rust_type} {{",
+                f"        unsafe {{ (self.get_{port.name}_fn)(self.handle.as_ptr()) }}",
+                "    }",
+                "",
+            ]
         )
-        impl_lines.append(
-            f"        unsafe {{ raw::{prefix}_get_{port.name}(self.ptr) }}"
-        )
-        impl_lines.append("    }")
     impl_lines.append("}")
-    impl_lines.append("")
+    lines.extend(impl_lines)
+    lines.append("")
+    lines.append(f"impl Drop for {struct_name} {{")
+    lines.append(
+        "    fn drop(&mut self) { unsafe { (self.free_fn)(self.handle.as_ptr()) } }"
+    )
+    lines.append("}")
 
-    drop_lines = [
-        f"impl Drop for {struct_name} {{",
-        f"    fn drop(&mut self) {{ unsafe {{ raw::{prefix}_free(self.ptr) }} }}",
-        "}",
-    ]
-
-    return "\n".join([
-        "#![allow(dead_code)]",
-        "#[repr(C)]",
-        "#[allow(non_camel_case_types)]",
-        "pub struct ModuleHandle { _private: [u8; 0] }",
-        "",
-        *raw_mod_lines,
-        "",
-        *struct_lines,
-        *impl_lines,
-        *drop_lines,
-    ])
+    return "\n".join(lines)
 
 
 def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
@@ -376,6 +416,115 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
         )
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def _build_verilator_library(crate: ExternalFFIModule) -> Path:
+    """Compile the Verilator-generated model and wrapper into a shared library."""
+
+    crate_path = crate.crate_path
+    sv_source = crate_path / crate.sv_rel_path
+    if not sv_source.exists():
+        raise FileNotFoundError(f"SystemVerilog source not found: {sv_source}")
+
+    build_root = crate_path / "build"
+    obj_dir = build_root / "verilated"
+    shutil.rmtree(build_root, ignore_errors=True)
+    obj_dir.mkdir(parents=True, exist_ok=True)
+
+    verilator_exe = os.environ.get("ASSASSYN_VERILATOR", "verilator")
+    verilator_cmd = [
+        verilator_exe,
+        "--cc",
+        str(sv_source),
+        "--top-module",
+        crate.top_module,
+        "-O3",
+        "--Mdir",
+        str(obj_dir),
+    ]
+    _run_subprocess(verilator_cmd)
+
+    verilator_root = os.environ.get("VERILATOR_ROOT")
+    if not verilator_root:
+        raise EnvironmentError(
+            "VERILATOR_ROOT is not set. Please run 'source setup.sh' before generating external FFIs."
+        )
+    verilator_root_path = Path(verilator_root)
+    include_dir = verilator_root_path / "include"
+    vltstd_dir = include_dir / "vltstd"
+    if not include_dir.exists():
+        raise FileNotFoundError(f"Verilator include directory not found: {include_dir}")
+
+    cpp_class = f"V{crate.top_module}"
+    aggregated = obj_dir / f"{cpp_class}__ALL.cpp"
+
+    source_files: List[Path] = []
+    if aggregated.exists():
+        source_files.append(aggregated)
+    else:
+        for path in sorted(obj_dir.glob("*.cpp")):
+            if path.name.endswith("__ALL.cpp"):
+                continue
+            source_files.append(path)
+
+    wrapper_src = crate_path / "src" / "wrapper.cpp"
+    if not wrapper_src.exists():
+        raise FileNotFoundError(f"Wrapper source not found: {wrapper_src}")
+    source_files.append(wrapper_src)
+
+    runtime_sources = [include_dir / "verilated.cpp"]
+    threads_src = include_dir / "verilated_threads.cpp"
+    if threads_src.exists():
+        runtime_sources.append(threads_src)
+    dpi_src = include_dir / "verilated_dpi.cpp"
+    if dpi_src.exists():
+        runtime_sources.append(dpi_src)
+    source_files.extend(runtime_sources)
+
+    compiler = _compiler_command()
+    compile_cmd = compiler + [
+        "-std=c++17",
+        "-O3",
+        "-fPIC",
+        "-Wno-unused-parameter",
+        "-I",
+        str(obj_dir),
+        "-I",
+        str(include_dir),
+        "-I",
+        str(vltstd_dir),
+    ]
+
+    lib_filename = f"lib{crate.dynamic_lib_name}{_dynamic_lib_suffix()}"
+    lib_path = crate_path / lib_filename
+    if lib_path.exists():
+        lib_path.unlink()
+
+    system = platform.system().lower()
+    if system == "darwin":
+        compile_cmd.extend(["-dynamiclib", "-o", str(lib_path)])
+        compile_cmd.extend(["-Wl,-install_name,@rpath/" + lib_filename])
+    else:
+        compile_cmd.extend(["-shared", "-o", str(lib_path)])
+
+    compile_cmd.extend(str(path) for path in source_files)
+
+    if system == "darwin":
+        compile_cmd.append("-lc++")
+    elif system != "windows":
+        compile_cmd.append("-lstdc++")
+
+    _run_subprocess(compile_cmd)
+
+    if not lib_path.exists():
+        raise RuntimeError(f"Failed to build Verilator shared library at {lib_path}")
+
+    manifest_path = crate_path / ".verilator-lib-path"
+    manifest_path.write_text(str(lib_path.resolve()), encoding="utf-8")
+
+    crate.lib_filename = lib_filename
+    crate.lib_path = lib_path.resolve()
+    return crate.lib_path
 
 
 def generate_external_sv_crates(
@@ -455,15 +604,14 @@ def generate_external_sv_crates(
         )
 
         cargo_toml = _generate_cargo_toml(spec)
-        build_rs = _generate_build_rs(spec)
         lib_rs = _generate_lib_rs(spec)
         wrapper_cpp = _generate_wrapper_cpp(spec)
 
         _write_file(crate_path / "Cargo.toml", cargo_toml)
-        _write_file(crate_path / "build.rs", build_rs)
         _write_file(crate_path / "src/lib.rs", lib_rs)
         _write_file(crate_path / "src/wrapper.cpp", wrapper_cpp)
 
+        _build_verilator_library(spec)
         specs.append(spec)
 
     manifest = {
@@ -477,6 +625,8 @@ def generate_external_sv_crates(
                 "struct_name": spec.struct_name,
                 "has_clock": spec.has_clock,
                 "has_reset": spec.has_reset,
+                "lib_filename": spec.lib_filename,
+                "lib_path": str(spec.lib_path) if spec.lib_path else "",
                 "inputs": [
                     {
                         "name": port.name,

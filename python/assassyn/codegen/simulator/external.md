@@ -12,12 +12,13 @@ This document explains how the simulator generator integrates Verilog modules th
 2. **Workspace preparation** – The Verilator output directory is cleared and recreated. A dedicated Cargo crate directory is created for every module (`verilated_<module>`), including `src/` and `rtl/` subdirectories.
 3. **Source staging** – The original SystemVerilog file referenced by `ExternalSV.file_path` is copied into the crate’s `rtl/` directory.
 4. **Metadata collection** – Port directions, bit widths, and signedness are mapped to both C and Rust scalar types (currently up to 64 bits). Clock and reset presence is recorded.
-5. **Code emission** – Four artifacts are emitted per crate:
-   - `Cargo.toml` declaring the crate and the `cc` build dependency.
-   - `build.rs` (from `build_rs_template.rs`) which drives Verilator and links the generated model into a shared library.
-   - `src/lib.rs` exposing a safe Rust wrapper around the raw C FFI.
+5. **Code emission** – The generator emits the following artifacts per crate:
+   - `Cargo.toml` declaring the crate with a `libloading` dependency (no build script required).
+   - `src/lib.rs` exposing a safe Rust wrapper that loads symbols at runtime.
    - `src/wrapper.cpp` implementing the C ABI that bridges to the verilated C++ model.
-6. **Manifest** – A `external_modules.json` file is written beside the simulator Cargo project summarising every external module (crate path, library name, struct wrapper, ports, clocks, resets). The simulator generator later consumes this manifest to wire handles and link crates.
+   - `.verilator-lib-path` containing the absolute path to the freshly built shared library.
+   - `lib<crate>_ffi.{so|dylib|dll}` produced directly by the generator.
+6. **Manifest** – A `external_modules.json` file is written beside the simulator Cargo project summarising every external module (crate path, library name, struct wrapper, ports, clocks, resets, library path). The simulator generator later consumes this manifest to wire handles and link crates.
 
 ### Naming strategy
 
@@ -25,14 +26,14 @@ Crate names default to `verilated_<external_module_name>` (sanitised with `namif
 
 ## Generated Crate Details
 
-### `build.rs`
+### Prebuilt shared library
 
-The build script wraps Verilator invocation. It:
+The generator invokes Verilator and links the wrapper immediately:
 - Picks the Verilator executable from `ASSASSYN_VERILATOR` or falls back to `verilator` on `PATH`.
-- Requires `VERILATOR_ROOT` to locate headers and runtimes.
-- Places C++ output under `$OUT_DIR/verilated`, compiles it using `cc::Build`, and links `verilated.cpp`/`verilated_threads.cpp` when available.
-- Builds `src/wrapper.cpp`, then links the generated static archives into a shared library whose suffix matches the target OS (`.so`, `.dylib`, `.dll`).
-- Emits appropriate `cargo:rustc-*` directives so the simulator links against the shared library and refreshes when SV sources or environment variables change.
+- Requires `VERILATOR_ROOT` to locate headers and runtime sources.
+- Runs Verilator with `--cc` into a crate-local `build/verilated` directory.
+- Compiles the generated C++ together with `src/wrapper.cpp` using the host C++17 toolchain (`CXX`, or the first available `clang++`/`g++`/`c++`), emitting `lib<crate>_ffi.{so|dylib|dll}` in the crate root.
+- Records the absolute library path in `.verilator-lib-path`, which is later embedded into the Rust wrapper and the simulator manifest.
 
 ### `src/wrapper.cpp`
 
@@ -45,9 +46,10 @@ The wrapper exposes a C ABI tailored to the module’s ports:
 
 ### `src/lib.rs`
 
-`lib.rs` wraps the C signatures in a Rust `struct` with safe-ish semantics:
-- The raw functions live under a `pub mod raw` exposing `extern "C"` signatures.
-- The wrapper tracks an owned `*mut ModuleHandle`; `Drop` automatically calls `*_free`.
+`lib.rs` wraps the C ABI in a Rust `struct` with runtime loading:
+- The shared library path is embedded via `include_str!("../.verilator-lib-path")`.
+- Functions are resolved with `libloading::Library`; failures panic with descriptive errors.
+- The wrapper tracks an owned `NonNull<ModuleHandle>`; `Drop` automatically calls `*_free`.
 - Inputs map to `set_<port>` methods consuming Rust scalar types (`u{8,16,32,64}` or signed variants). Outputs use `get_<port>`.
 - When clocks or resets exist we expose `set_clock`, `clock_tick`, `set_reset`, and `apply_reset`. Clock ticks toggle the clock low/high with interleaved `eval()` calls.
 - The `struct` name is derived from the symbol prefix (CamelCase). This name is used by the simulator to reference the handle field (`<module>_ffi`).
@@ -70,14 +72,14 @@ The wrapper exposes a C ABI tailored to the module’s ports:
 
 - External modules without clocks are treated as combinational blocks: inputs are driven via `set_*` calls and `eval()` is automatically inserted immediately before an output read if inputs changed in the same downstream visit.
 - External modules with clocks rely on periodic `clock_tick()` calls from their owning downstream module. The simulator toggles the clock and performs two `eval()` calls (falling then rising edge). Resets, when present, can be asserted via `set_reset`/`apply_reset`.
-- The generated manifest allows higher-level tooling to load external shared libraries at runtime if dynamic loading is required (the simulator links statically by default through the path dependencies).
+- The generated manifest lists absolute shared-library paths so higher-level tooling can validate or reload them if needed. The simulator relies on the runtime loader embedded in each crate, so missing or stale libraries trigger an immediate panic with the failing path.
 
 ## Environment Requirements and Customisation
 
 - Install Verilator and ensure `VERILATOR_ROOT` points at the installation root (the generator fails early if the variable is missing).
 - Optional `ASSASSYN_VERILATOR` lets you override the Verilator binary location.
-- The generated crates use `cc` for compilation, so a C++17-capable toolchain must be available on the host system.
-- If you need to tweak the build flags or linking strategy, modify `python/assassyn/codegen/simulator/build_rs_template.rs`. Because `_generate_build_rs` simply performs placeholder substitution, custom changes in the template propagate to all future crate generations.
+- Provide a C++17-capable toolchain. Set `CXX` to the desired compiler, otherwise the generator probes `clang++`, `g++`, then `c++`.
+- To tweak build flags or linking strategy, adjust `_build_verilator_library()` in `python/assassyn/codegen/simulator/external.py`.
 
 ## Debugging Tips
 
