@@ -36,11 +36,11 @@ class ForwardData(Module):
 class ExternalAdder(ExternalSV):
     '''External SystemVerilog adder module.'''
 
-    a: WireIn[UInt(32)]
-    b: WireIn[UInt(32)]
-    c: WireOut[UInt(32)]
+    a: Input[UInt(32)]
+    b: Input[UInt(32)]
+    c: Output[UInt(32)]
 
-    __source__: str = "python/ci-tests/resources/adder.sv"
+    __source__: str = "python/unit-tests/resources/adder.sv"
     __module_name__: str = "adder"
 
 
