@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from ...analysis import topo_downstream_modules, get_upstreams
 from .utils import dtype_to_rust_type, int_imm_dumper_impl, fifo_name
 from ...builder import SysBuilder
@@ -99,7 +100,6 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     fd.write("pub struct Simulator { pub stamp: usize, ")
     fd.write("pub mem_interface: MemoryInterface,\n")
     fd.write("pub request_stamp_map_table: HashMap<i64, usize>,\n")
-    home = repo_path()
     # Add array fields to simulator struct
     port_manager = get_port_manager()
     for array in sys.arrays:
@@ -264,12 +264,23 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Generate simulate function
     fd.write("pub fn simulate() {\n")
     fd.write("  let mut sim = Simulator::new();\n")
-    fd.write(f"""
-     unsafe {{
-            sim.mem_interface
-                .init("{home}/tools/c-ramulator2-wrapper/configs/example_config.yaml");
-        }}
-    """)
+    default_config_path = (
+        Path(repo_path())
+        / "tools"
+        / "c-ramulator2-wrapper"
+        / "configs"
+        / "example_config.yaml"
+    ).as_posix()
+    fd.write(
+        '  let config_path = std::env::var("ASSASSYN_HOME")\n'
+        '    .map(|home| format!("{}/tools/c-ramulator2-wrapper/configs/example_config.yaml", home))\n'
+        f'    .unwrap_or_else(|_| String::from("{default_config_path}"));\n'
+    )
+    fd.write(
+        "  unsafe {\n"
+        "    sim.mem_interface.init(&config_path);\n"
+        "  }\n"
+    )
 
     # Handle randomization if enabled
     if config.get('random', False):

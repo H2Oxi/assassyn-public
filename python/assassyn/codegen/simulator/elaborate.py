@@ -93,7 +93,20 @@ def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs) -> Path:
 def elaborate_impl(sys: "SysBuilder", config: dict[str, typing.Any]):
     """Internal implementation of the elaborate function."""
 
-    _, simulator_path, verilator_root = _resolve_workspace_paths(sys, config)
+    workspace_root, simulator_path, verilator_root = _resolve_workspace_paths(sys, config)
+
+    # Clean up legacy flat-layout outputs (workspace/<name>_simulator) when present
+    if config.get("cleanup_legacy_layout", True):
+        if workspace_root.name == sys.name:
+            legacy_root = workspace_root.parent
+            if legacy_root:
+                for legacy in (
+                    legacy_root / simulator_path.name,
+                    legacy_root / verilator_root.name,
+                    legacy_root / f"{sys.name}_verilog",
+                ):
+                    if legacy.exists() and legacy != simulator_path and legacy != verilator_root:
+                        shutil.rmtree(legacy, ignore_errors=True)
 
     if simulator_path.exists() and config.get('override_dump', True):
         shutil.rmtree(simulator_path)

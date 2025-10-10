@@ -37,7 +37,9 @@ class Visitor:
 
     def visit_module(self, node: Module):
         '''Enter a module'''
-        self.visit_block(node.body)
+        body = getattr(node, "body", None)
+        if body is not None:
+            self.visit_block(body)
 
     def visit_block(self, node: Block):
         '''Enter a block'''
