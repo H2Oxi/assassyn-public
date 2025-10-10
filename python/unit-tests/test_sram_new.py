@@ -3,29 +3,24 @@ from assassyn.frontend import *
 from assassyn import backend
 from assassyn import utils
 from assassyn.ir.module.downstream import Downstream, combinational
-from assassyn.ir.module.external import ExternalSV
 
+
+@external
 class ExternalSRAM(ExternalSV):
     '''External SystemVerilog SRAM module.'''
-    
-    def __init__(self, **in_wire_connections):
-        super().__init__(
-            file_path="python/unit-tests/resources/sram.sv",
-            module_name="sram",
-            has_clock=True,
-            has_reset=True,
-            in_wires={
-                'address': Bits(9),
-                'wd': Bits(32),
-                'banksel': Bits(1),
-                'read': Bits(1),
-                'write': Bits(1),
-            },
-            out_wires={
-                'dataout': Bits(32),
-            },
-            **in_wire_connections
-        )
+
+    address: Input[Bits(9)]
+    wd: Input[Bits(32)]
+    banksel: Input[Bits(1)]
+    read: Input[Bits(1)]
+    write: Input[Bits(1)]
+
+    dataout: Output[Bits(32)]
+
+    __source__: str = "python/unit-tests/resources/sram.sv"
+    __module_name__: str = "sram"
+    __has_clock__: bool = True
+    __has_reset__: bool = True
 
 
 class MemUser(Module):
@@ -66,7 +61,14 @@ class Driver(Module):
         #sram = SRAM(width, 512, init_file)
         #sram.build(we, re, addr, v.bitcast(Bits(width)), user)
         #TODO support the constant value directly
-        data_out = external_sram.in_assign(address=addr, wd=v.bitcast(Bits(width)), banksel=en, read=re, write=we)
+        external_sram.in_assign(
+            address=addr,
+            wd=v.bitcast(Bits(width)),
+            banksel=en,
+            read=re,
+            write=we,
+        )
+        data_out = external_sram.dataout
         log('banksel {} data_out {}', en, data_out)
         with Condition(we):
             log('[driver] Wrote {} to address {}', v, waddr)

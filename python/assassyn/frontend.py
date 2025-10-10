@@ -8,6 +8,7 @@ from .ir.expr import Expr, log, concat, finish, wait_until, assume, barrier
 from .ir.expr import send_read_request, send_write_request
 from .ir.expr import has_mem_resp
 from .ir.module import Module, Port, Downstream, fsm
+from .ir.module.external import ExternalSV, external, Input, Output
 from .ir.memory.sram import SRAM
 from .ir.memory.dram import DRAM
 from .ir.block import Condition, Cycle
