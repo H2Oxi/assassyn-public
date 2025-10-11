@@ -33,12 +33,12 @@ class ForwardData(Module):
 class ExternalMultiplier(ExternalSV):
     '''External SystemVerilog multiplier module.'''
 
-    a: Input[UInt(32)]
-    b: Input[UInt(32)]
-    in_valid: Input[Bits(1)]
+    a: WireIn[UInt(32)]
+    b: WireIn[UInt(32)]
+    in_valid: WireIn[Bits(1)]
 
-    p: Output[UInt(64)]
-    out_valid: Output[Bits(1)]
+    p: RegOut[UInt(64)]
+    out_valid: RegOut[Bits(1)]
 
     __source__: str = "python/ci-tests/resources/mul_pipe_simple.sv"
     __module_name__: str = "mul_pipe_simple"
@@ -70,8 +70,8 @@ class Wrapper(Downstream):
         in_valid = a > UInt(32)(2)  # Always valid input
 
         ext_mul.in_assign(a=a, b=b, in_valid=in_valid)
-        out_ready = ext_mul.out_valid
-        p = ext_mul.p
+        out_ready = ext_mul.out_valid[0]
+        p = ext_mul.p[0]
 
         with Condition(out_ready):
             sink.async_called(data=p)

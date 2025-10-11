@@ -76,9 +76,19 @@ class Expr(Value):
                     current_module = Singleton.builder.current_module
                     expr_module = i.parent.module if i.parent else None
                     if not isinstance(current_module, Downstream):
-                        assert current_module == expr_module, \
-                            f'Expression {i} is from module {expr_module}, \
-                            but current module is {current_module}'
+                        allow_cross_module = False
+                        if isinstance(i, WireRead):
+                            wire_owner = getattr(i.wire, 'module', None)
+                            if wire_owner is None:
+                                wire_owner = getattr(i.wire, 'parent', None)
+                            if wire_owner is not None:
+                                # Import locally to avoid circular dependency at module load time
+                                from ..module.external import ExternalSV  # pylint: disable=import-outside-toplevel
+                                allow_cross_module = isinstance(wire_owner, ExternalSV)
+                        if not allow_cross_module:
+                            assert current_module == expr_module, \
+                                f'Expression {i} is from module {expr_module}, \
+                                but current module is {current_module}'
                     wrapped = Operand(i, self)
                     i.users.append(wrapped)
             elif isinstance(i, (Const, str, RecordValue)):

@@ -4,9 +4,10 @@ from ...ir.module import Module, Port, Wire
 from ...ir.const import Const
 from ...ir.array import Array
 from ...ir.dtype import RecordValue
-from ...ir.expr import Expr, FIFOPop
+from ...ir.expr import Expr, FIFOPop, WireRead
 from ...utils import namify, unwrap_operand
 from .utils import dump_type
+from ._expr.call import register_external_wire_read
 def _dump_fifo_pop(_dumper, node, with_namespace: bool, _module_name: str = None) -> str:
     if not with_namespace:
         return f'self.{namify(node.fifo.name)}'
@@ -73,6 +74,9 @@ def dump_rval(dumper, node, with_namespace: bool, module_name: str = None) -> st
         String representation of the rvalue
     """
     node = unwrap_operand(node)
+
+    if isinstance(node, WireRead):
+        register_external_wire_read(dumper, node)
 
     # Special case: check for external expressions first
     if (
