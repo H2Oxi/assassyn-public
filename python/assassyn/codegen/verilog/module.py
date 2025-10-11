@@ -33,13 +33,6 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
         if node in dumper.downstream_dependencies:
             for dep_mod in dumper.downstream_dependencies[node]:
                 dumper.append_code(f'{namify(dep_mod.name)}_executed = Input(Bits(1))')
-        for ext_val in node.externals:
-            if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
-                continue
-            port_name = dumper.get_external_port_name(ext_val)
-            port_type = dump_type(ext_val.dtype)
-            dumper.append_code(f'{port_name} = Input({port_type})')
-            dumper.append_code(f'{port_name}_valid = Input(Bits(1))')
         if is_sram:
             sram_info = get_sram_info(node)
             if sram_info:
@@ -53,6 +46,14 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
 
     elif is_driver or node in dumper.async_callees:
         dumper.append_code('trigger_counter_pop_valid = Input(Bits(1))')
+
+    for ext_val in node.externals:
+        if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
+            continue
+        port_name = dumper.get_external_port_name(ext_val)
+        port_type = dump_type(ext_val.dtype)
+        dumper.append_code(f'{port_name} = Input({port_type})')
+        dumper.append_code(f'{port_name}_valid = Input(Bits(1))')
 
     if not is_downstream and not dumper._is_external_module(node):
         for i in node.ports:
