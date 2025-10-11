@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import typing
+from collections import defaultdict
 
 from ...ir.visitor import Visitor
 from ...ir.block import Block, CondBlock, CycledBlock
 from ...ir.dtype import RecordValue
 from ...ir.expr import Expr, WireAssign, WireRead
-from ...utils import namify
+from ...utils import namify, unwrap_operand
 from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
 from .callback_collector import collect_callback_intrinsics, CallbackMetadata
@@ -37,6 +38,37 @@ class ElaborateModule(Visitor):
         self.module_ctx = None
         self.callback_metadata = callback_metadata
         self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
+        self.external_value_assignments = self._collect_external_value_assignments(sys)
+        self.emitted_external_assignments = set()
+
+    def _collect_external_value_assignments(self, sys):
+        """Precompute external input assignments keyed by producing expression."""
+        from ...ir.expr import WireAssign  # pylint: disable=import-outside-toplevel
+
+        assignments = defaultdict(list)
+
+        for module in getattr(sys, "downstreams", []):
+            if not isinstance(module, ExternalSV):
+                continue
+            body = getattr(module, "body", None)
+            if body is None:
+                continue
+            stack = [body]
+            while stack:
+                block = stack.pop()
+                for elem in getattr(block, "body", []):
+                    if isinstance(elem, Block):
+                        stack.append(elem)
+                    elif isinstance(elem, WireAssign):
+                        value = unwrap_operand(elem.value)
+                        if isinstance(value, Expr):
+                            parent_block = getattr(value, "parent", None)
+                            producer_module = getattr(parent_block, "module", None)
+                            if producer_module is None:
+                                continue
+                            value_id = namify(value.as_operand())
+                            assignments[(producer_module, value_id)].append((module, elem.wire))
+        return assignments
 
     @staticmethod
     def _has_body(module: Module) -> bool:
@@ -82,6 +114,17 @@ class ElaborateModule(Visitor):
         wire_name = getattr(wire, "name", None)
         if not isinstance(owner, ExternalSV) or not wire_name:
             return None
+
+        value_expr = unwrap_operand(node.value)
+        if isinstance(value_expr, Expr):
+            parent_block = getattr(value_expr, "parent", None)
+            producer_module = getattr(parent_block, "module", None)
+            if producer_module is not None:
+                value_id = namify(value_expr.as_operand())
+                key = (producer_module, value_id)
+                if key in self.external_value_assignments:
+                    # Assignment handled in producer module to preserve evaluation ordering.
+                    return ""
 
         spec = self.external_specs.get(owner.name)
         if spec is None:
@@ -168,12 +211,28 @@ class ElaborateModule(Visitor):
 
         if id_and_exposure:
             id_expr, need_exposure = id_and_exposure
-            valid_update = ""
-            if need_exposure:
-                valid_update = f"sim.{id_expr}_value = Some({id_expr}.clone());"
-
             if code:
-                result = f"{indent_str}let {id_expr} = {{ {code} }}; {valid_update}\n"
+                lines = [f"{indent_str}let {id_expr} = {{ {code} }};"]
+                if need_exposure:
+                    lines.append(f"{indent_str}sim.{id_expr}_value = Some({id_expr}.clone());")
+                key = (self.module_ctx, id_expr)
+                if key in self.external_value_assignments and key not in self.emitted_external_assignments:
+                    assignments = self.external_value_assignments[key]
+                    for ext_module, wire in assignments:
+                        handle_field = external_handle_field(ext_module.name)
+                        setter_suffix = namify(wire.name)
+                        port_spec = self._lookup_external_port(ext_module.name, wire.name, "input")
+                        rust_ty = (
+                            port_spec.rust_type
+                            if port_spec is not None
+                            else dtype_to_rust_type(wire.dtype)
+                        )
+                        lines.append(
+                            f"{indent_str}sim.{handle_field}.set_{setter_suffix}("
+                            f"ValueCastTo::<{rust_ty}>::cast(&{id_expr}));"
+                        )
+                    self.emitted_external_assignments.add(key)
+                result = "\n".join(lines) + "\n"
         else:
             if code:
                 result += f"{indent_str}{code};\n"

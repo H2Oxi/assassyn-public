@@ -241,6 +241,41 @@ def generate_top_harness(dumper):
                     )
                 port_map.append(f"{namify(port.name)}_valid={fifo_base_name}_pop_valid")
 
+            consumer_external_entries = external_assignments_by_consumer.get(module, [])
+            handled_consumer_ports = set()
+            for assignment in consumer_external_entries:
+                expr = assignment['expr']
+                consumer_port = dumper.get_external_port_name(expr)
+                if consumer_port in handled_consumer_ports:
+                    continue
+                handled_consumer_ports.add(consumer_port)
+                dtype = dump_type(expr.dtype)
+                if consumer_port not in declared_cross_module_wires:
+                    dumper.append_code(f'{consumer_port} = Wire({dtype})')
+                    declared_cross_module_wires.add(consumer_port)
+                valid_name = f"{consumer_port}_valid"
+                if valid_name not in declared_cross_module_wires:
+                    dumper.append_code(f'{valid_name} = Wire(Bits(1))')
+                    declared_cross_module_wires.add(valid_name)
+
+                port_map.append(f"{consumer_port}={consumer_port}")
+                port_map.append(f"{valid_name}={valid_name}")
+
+                producer_module = assignment['producer']
+                producer_name = namify(producer_module.name)
+                producer_port = dumper.external_wire_outputs.get(assignment['wire'])
+                if producer_port is None:
+                    continue
+                assignments = [
+                    f'{consumer_port}.assign(inst_{producer_name}.expose_{producer_port})',
+                    f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
+                ]
+                target_lines = module_connection_map.get(producer_module)
+                if target_lines is not None:
+                    target_lines.extend(assignments)
+                else:
+                    pending_connection_assignments[producer_module].extend(assignments)
+
         else:
             if module in dumper.downstream_dependencies:
                 for dep_mod in dumper.downstream_dependencies[module]:
