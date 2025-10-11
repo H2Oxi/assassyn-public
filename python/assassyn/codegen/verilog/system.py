@@ -90,14 +90,14 @@ def generate_system(dumper, node):
 
     # Process only non-external modules from sys.modules
     for elem in sys.modules:
-        if dumper._is_external_module(elem):
+        if dumper.is_stub_external(elem):
             continue
 
         dumper.current_module = elem
         dumper.visit_module(elem)
     dumper.current_module = None
     for elem in sys.downstreams:
-        if dumper._is_external_module(elem):
+        if dumper.is_stub_external(elem):
             continue
         dumper.current_module = elem
         dumper.visit_module(elem)

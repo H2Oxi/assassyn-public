@@ -2,6 +2,8 @@
 # pylint: disable=protected-access
 """Top-level harness generation for Verilog designs."""
 
+from collections import defaultdict
+
 from .utils import (
     dump_type,
     dump_type_cast,
@@ -9,6 +11,7 @@ from .utils import (
 )
 
 from ...ir.module import Downstream
+from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
 from ...ir.expr import (
     FIFOPush,
@@ -16,6 +19,7 @@ from ...ir.expr import (
     AsyncCall,
     Bind,
     Intrinsic,
+    WireRead,
 )
 from ...ir.dtype import Record
 from ...utils import namify, unwrap_operand
@@ -78,7 +82,7 @@ def generate_top_harness(dumper):
     # --- 1. Wire Declarations (Generic) ---
     dumper.append_code('# --- Wires for FIFOs, Triggers, and Arrays ---')
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         for port in module.ports:
             fifo_base_name = f'fifo_{namify(module.name)}_{namify(port.name)}'
@@ -92,7 +96,7 @@ def generate_top_harness(dumper):
 
     # Wires for TriggerCounters (one per module)
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         tc_base_name = f'{namify(module.name)}_trigger_counter'
         dumper.append_code(f'# Wires for {module.name}\'s TriggerCounter')
@@ -140,7 +144,7 @@ def generate_top_harness(dumper):
 
     module_fifo_depths = {}
     all_modules = [m for m in (dumper.sys.modules + dumper.sys.downstreams)
-                   if not dumper._is_external_module(m)]
+                   if not dumper.is_stub_external(m)]
     default_fifo_depth = 2
     for mod in all_modules:
         module_fifo_depths[mod] = \
@@ -162,7 +166,7 @@ def generate_top_harness(dumper):
                 module_fifo_depths[owner][fifo_port] = max(current, depth)
 
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         depth_map = module_fifo_depths.get(module, {})
         for port in module.ports:
@@ -186,7 +190,7 @@ def generate_top_harness(dumper):
 
     # Instantiate TriggerCounters
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         tc_base_name = f'{namify(module.name)}_trigger_counter'
         dumper.append_code(
@@ -203,12 +207,16 @@ def generate_top_harness(dumper):
 
     dumper.append_code('\n# --- Module Instantiations and Connections ---')
 
-    sorted_downstreams = topo_downstream_modules(dumper.sys)
-    all_modules = dumper.sys.modules + sorted_downstreams
-    instantiation_modules = [
-        module for module in all_modules if not dumper._is_external_module(module)
-    ]
-    module_connections = []
+    all_modules = dumper.sys.modules + dumper.sys.downstreams
+    non_external_modules = [m for m in all_modules if not isinstance(m, ExternalSV)]
+    external_modules = [m for m in all_modules if isinstance(m, ExternalSV)]
+    instantiation_modules = non_external_modules + external_modules
+    module_connection_map = {}
+    pending_connection_assignments = defaultdict(list)
+    declared_cross_module_wires = set()
+    external_assignments_by_consumer = defaultdict(list)
+    for entry in dumper.external_wire_assignments:
+        external_assignments_by_consumer[entry['consumer']].append(entry)
 
     for module in instantiation_modules:
         mod_name = namify(module.name)
@@ -217,6 +225,8 @@ def generate_top_harness(dumper):
 
         dumper.append_code(f'# Instantiation for {module.name}')
         port_map = ['clk=self.clk', 'rst=self.rst', 'cycle_count=cycle_count']
+        connection_lines = pending_connection_assignments.pop(module, [])
+        module_connection_map[module] = connection_lines
 
         if not is_downstream:
             port_map.append(f"trigger_counter_pop_valid={mod_name}_trigger_counter_pop_valid")
@@ -237,23 +247,123 @@ def generate_top_harness(dumper):
                     dep_name = namify(dep_mod.name)
                     port_map.append(f"{dep_name}_executed=inst_{dep_name}.executed")
 
-            for ext_val in module.externals:
-                if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
+            consumer_external_entries = external_assignments_by_consumer.get(module, [])
+            handled_consumer_ports = set()
+            for assignment in consumer_external_entries:
+                expr = assignment['expr']
+                consumer_port = dumper.get_external_port_name(expr)
+                if consumer_port in handled_consumer_ports:
                     continue
-                producer_module = ext_val.parent.module
+                handled_consumer_ports.add(consumer_port)
+                dtype = dump_type(expr.dtype)
+                if consumer_port not in declared_cross_module_wires:
+                    dumper.append_code(f'{consumer_port} = Wire({dtype})')
+                    declared_cross_module_wires.add(consumer_port)
+                valid_name = f"{consumer_port}_valid"
+                if valid_name not in declared_cross_module_wires:
+                    dumper.append_code(f'{valid_name} = Wire(Bits(1))')
+                    declared_cross_module_wires.add(valid_name)
+
+                port_map.append(f"{consumer_port}={consumer_port}")
+                port_map.append(f"{valid_name}={valid_name}")
+
+                producer_module = assignment['producer']
                 producer_name = namify(producer_module.name)
-                port_name = dumper.get_external_port_name(ext_val)
-                exposed_name = dumper.dump_rval(ext_val, True)
+                producer_port = dumper.external_wire_outputs.get(assignment['wire'])
+                if producer_port is None:
+                    continue
+                assignments = [
+                    f'{consumer_port}.assign(inst_{producer_name}.expose_{producer_port})',
+                    f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
+                ]
+                target_lines = module_connection_map.get(producer_module)
+                if target_lines is not None:
+                    target_lines.extend(assignments)
+                else:
+                    pending_connection_assignments[producer_module].extend(assignments)
 
-                data_conn = \
-                    f"{port_name}=inst_{producer_name}.expose_{exposed_name}"
-                valid_conn = (
-                    f"{port_name}_valid="
-                    f"inst_{producer_name}.valid_{exposed_name}"
-                )
+            if isinstance(module, ExternalSV):
+                in_wires = getattr(module, 'in_wires', None)
+                if in_wires is not None:
+                    for wire_name in in_wires.keys():
+                        try:
+                            source_expr = in_wires[wire_name]
+                        except KeyError:
+                            continue
+                        if source_expr is None:
+                            continue
+                        producer_module = getattr(source_expr.parent, 'module', None)
+                        if producer_module is None:
+                            continue
+                        producer_name = namify(producer_module.name)
+                        port_name = dumper.get_external_port_name(source_expr)
+                        dtype = dump_type(source_expr.dtype)
+                        if port_name not in declared_cross_module_wires:
+                            dumper.append_code(f'{port_name} = Wire({dtype})')
+                            declared_cross_module_wires.add(port_name)
+                        valid_name = f"{port_name}_valid"
+                        if valid_name not in declared_cross_module_wires:
+                            dumper.append_code(f'{valid_name} = Wire(Bits(1))')
+                            declared_cross_module_wires.add(valid_name)
 
-                port_map.append(data_conn)
-                port_map.append(valid_conn)
+                        port_map.append(f"{port_name}={port_name}")
+                        port_map.append(f"{valid_name}={valid_name}")
+
+                        exposed_name = dumper.dump_rval(source_expr, True)
+                        assignments = [
+                            f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
+                            f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
+                        ]
+                        target_lines = module_connection_map.get(producer_module)
+                        if target_lines is not None:
+                            target_lines.extend(assignments)
+                        else:
+                            pending_connection_assignments[producer_module].extend(assignments)
+            else:
+                for ext_val in module.externals:
+                    if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
+                        continue
+                    if isinstance(ext_val, WireRead):
+                        wire = getattr(ext_val, 'wire', None)
+                        owner = getattr(wire, 'parent', None) if wire is not None else None
+                        if owner is None and wire is not None:
+                            owner = getattr(wire, 'module', None)
+                        if isinstance(owner, ExternalSV):
+                            continue
+                    producer_module = ext_val.parent.module
+                    producer_ctx_name = namify(producer_module.name)
+                    if isinstance(ext_val, WireRead):
+                        wire = getattr(ext_val, 'wire', None)
+                        owner = getattr(wire, 'parent', None) if wire is not None else None
+                        if owner is None and wire is not None:
+                            owner = getattr(wire, 'module', None)
+                        if owner is not None:
+                            producer_module = owner
+                            producer_ctx_name = namify(owner.name)
+                    producer_name = namify(producer_module.name)
+                    port_name = dumper.get_external_port_name(ext_val)
+                    exposed_name = dumper.dump_rval(ext_val, True, producer_ctx_name)
+                    dtype = dump_type(ext_val.dtype)
+                    if port_name not in declared_cross_module_wires:
+                        dumper.append_code(f'{port_name} = Wire({dtype})')
+                        declared_cross_module_wires.add(port_name)
+                    valid_name = f"{port_name}_valid"
+                    if valid_name not in declared_cross_module_wires:
+                        dumper.append_code(f'{valid_name} = Wire(Bits(1))')
+                        declared_cross_module_wires.add(valid_name)
+
+                    port_map.append(f"{port_name}={port_name}")
+                    port_map.append(f"{valid_name}={valid_name}")
+
+                    assignments = [
+                        f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
+                        f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
+                    ]
+                    target_lines = module_connection_map.get(producer_module)
+                    if target_lines is not None:
+                        target_lines.extend(assignments)
+                    else:
+                        pending_connection_assignments[producer_module].extend(assignments)
             if is_sram:
                 sram_info = get_sram_info(module)
                 array = sram_info['array']
@@ -283,13 +393,13 @@ def generate_top_harness(dumper):
         # Filter out external modules from push targets
         filtered_push_targets = set()
         for (callee_mod, callee_port) in unique_push_targets:
-            if not dumper._is_external_module(callee_mod):
+            if not dumper.is_stub_external(callee_mod):
                 filtered_push_targets.add((callee_mod, callee_port))
 
         # Filter out external modules from call targets
         filtered_call_targets = set()
         for callee_mod in unique_call_targets:
-            if not dumper._is_external_module(callee_mod):
+            if not dumper.is_stub_external(callee_mod):
                 filtered_call_targets.add(callee_mod)
 
         for (callee_mod, callee_port) in filtered_push_targets:
@@ -305,7 +415,8 @@ def generate_top_harness(dumper):
 
         dumper.append_code(f"inst_{mod_name} = {mod_name}({', '.join(port_map)})")
 
-        connection_lines = []
+        if isinstance(module, ExternalSV):
+            continue
 
         if is_sram:
             sram_info = get_sram_info(module)
@@ -351,16 +462,23 @@ def generate_top_harness(dumper):
                 f".as_bits())"
             )
 
-        if connection_lines:
-            module_connections.append((module, connection_lines))
+    for module, lines in module_connection_map.items():
+        if lines:
+            module_connection_map[module] = list(dict.fromkeys(lines))
 
-    if module_connections:
+    has_connections = any(module_connection_map.get(m) for m in instantiation_modules)
+    if has_connections:
         dumper.append_code('\n# --- Module Connections ---')
-        for idx, (module, lines) in enumerate(module_connections):
+        remaining_modules = [
+            module for module in instantiation_modules
+            if module_connection_map.get(module)
+        ]
+        for idx, module in enumerate(remaining_modules):
+            lines = module_connection_map[module]
             dumper.append_code(f'# Connections for {module.name}')
             for line in lines:
                 dumper.append_code(line)
-            if idx != len(module_connections) - 1:
+            if idx != len(remaining_modules) - 1:
                 dumper.append_code('')
     dumper.append_code('\n# --- Global Finish Signal Collection ---')
     finish_signals = []
@@ -386,7 +504,7 @@ def generate_top_harness(dumper):
 
     # dumper.append_code('\n# --- Tie off unused FIFO push ports ---')
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         for port in getattr(module, 'ports', []):
             if port not in all_driven_fifo_ports:
@@ -404,7 +522,7 @@ def generate_top_harness(dumper):
 
     dumper.append_code('\n# --- Trigger Counter Delta Connections ---')
     for module in dumper.sys.modules:
-        if dumper._is_external_module(module):
+        if dumper.is_stub_external(module):
             continue
         mod_name = namify(module.name)
         if module in dumper.async_callees:
