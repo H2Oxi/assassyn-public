@@ -7,13 +7,13 @@ from pathlib import Path
 from ...analysis import topo_downstream_modules, get_upstreams
 from .utils import dtype_to_rust_type, int_imm_dumper_impl, fifo_name
 from ...builder import SysBuilder
-from ...ir.block import CycledBlock
-from ...ir.expr import Expr,Bind
+from ...ir.block import CycledBlock, Block
+from ...ir.expr import Expr, Bind, WireRead
 from ...ir.module import Downstream, Module
 from ...ir.memory.sram import SRAM
 from ...ir.module.external import ExternalSV
 from .external import external_handle_field
-from ...utils import namify, repo_path
+from ...utils import namify, repo_path, unwrap_operand
 from .port_mapper import get_port_manager
 
 
@@ -79,6 +79,32 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # First, analyze the system to determine port requirements
     # This registers all array write ports with the global port manager
     analyze_and_register_ports(sys)
+    def collect_external_wire_reads(module):
+        reads = set()
+
+        def visit_expr(expr):
+            if isinstance(expr, WireRead):
+                wire = expr.wire
+                owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+                if isinstance(owner, ExternalSV):
+                    reads.add(expr)
+            if isinstance(expr, Expr):
+                for operand in expr.operands:
+                    value = unwrap_operand(operand)
+                    if isinstance(value, Expr):
+                        visit_expr(value)
+
+        def visit_block(block):
+            if not isinstance(block, Block) or block.body is None:
+                return
+            for item in block.body:
+                if isinstance(item, Expr):
+                    visit_expr(item)
+                elif isinstance(item, Block):
+                    visit_block(item)
+
+        visit_block(getattr(module, "body", None))
+        return reads
 
     # Write imports
     fd.write("use sim_runtime::*;\n")
@@ -156,6 +182,15 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         elif isinstance(module, Downstream):
             # Gather expressions with external visibility for downstream modules
             for expr in module.externals:
+                if isinstance(expr, Expr):
+                    expr_validities.add(expr)
+
+        for expr in collect_external_wire_reads(module):
+            expr_validities.add(expr)
+
+        externals = getattr(module, 'externals', None)
+        if externals:
+            for expr in externals:
                 if isinstance(expr, Expr):
                     expr_validities.add(expr)
 

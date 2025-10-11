@@ -23,11 +23,11 @@ Both expressions inherit from the general `Expr` base class, so the rest of the 
 
 `ExternalSV` (`python/assassyn/ir/module/external.py`) extends the base `Module` with a thin façade over external SystemVerilog blocks:
 
-- **Constructor surface**: Alongside the usual `file_path`, `module_name`, and optional `has_clock`/`has_reset` switches, callers spell out the boundary via explicit `in_wires`/`out_wires` dictionaries. Relative file paths are preserved until elaboration resolves them against the build tree.
+- **Constructor surface**: Alongside the usual `file_path`, `module_name`, and optional `has_clock`/`has_reset` switches, callers can still spell out the boundary via explicit `in_wires`/`out_wires` dictionaries. In day-to-day code, the preferred path is to decorate subclasses with `@external` and declare ports through annotations: `WireIn[...]` for inputs, `WireOut[...]` for direct combinational outputs, and `RegOut[...]` for registered outputs that are consumed like read-only `RegArray` handles.
 
 - **Unified wire adapters**: Declared wires are stored in a single dictionary of `Wire` objects(`python/assassyn/ir/module/module.py`), and lightweight `DirectionalWires` views power both `self.in_wires` and `self.out_wires`. The adapter inspects its configured direction so one class cleanly handles input assignments and output reads.
 
-- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns `wire_read(wire_obj)`, ensuring every observation becomes a `WireRead` node. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
+- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns typed handles. `WireOut` ports immediately create `WireRead` values, while `RegOut` ports return a small proxy that must be indexed (e.g. `external_reg.reg_out[0]`) to record the read. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
 
 - **Metadata for downstream stages**: The constructor tags the instance with `Module.ATTR_EXTERNAL` and retains the populated wire dictionary, giving later passes full type/direction information for code emission and validation.
 
@@ -49,22 +49,21 @@ The Verilog backend (`python/assassyn/codegen/verilog/design.py`) consumes those
 
 1. **Define the external block**:
    ```python
-   class ExternalAdder(ExternalModule):
-       def __init__(self, **in_wire_connections):
-           super().__init__(
-               file_path="python/ci-tests/resources/adder.sv",
-               module_name="adder",
-               in_wires={'a': UInt(32), 'b': UInt(32)},
-               out_wires={'c': UInt(32)},
-               **in_wire_connections,
-           )
+   @external
+   class ExternalAdder(ExternalSV):
+       a: WireIn[UInt(32)]
+       b: WireIn[UInt(32)]
+       c: WireOut[UInt(32)]
+
+       __source__ = "python/ci-tests/resources/adder.sv"
+       __module_name__ = "adder"
    ```
-   The `in_wires`/`out_wires` dictionaries set up typed wires and enable the convenience accessors; the optional `**in_wire_connections` passes initial drivers that are turned into `WireAssign` nodes.
+   The annotations declare each port, and the decorator resolves `__source__`/`__module_name__` into the configuration that `ExternalSV` consumes.
 
 2. **Drive inputs and read outputs** inside a downstream module:
    ```python
    c = ext_adder.in_assign(a=a, b=b)
    ```
-   `in_assign` records the two input connections via `WireAssign` and returns the single declared output (`WireRead`), making the value immediately usable.
+   `in_assign` records the two input connections via `WireAssign` and returns the single declared `WireOut` (`WireRead`), making the value immediately usable.
 
 3. **Integrate the external module** just like native modules. We assumed the external module must be instantiated inside the downstream module, which make sure the value align with the wire connection. The system builder instantiates `ExternalAdder()` and passes it into `Adder.build`, allowing the rest of the design to treat `c` as any other value.

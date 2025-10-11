@@ -9,13 +9,13 @@ from assassyn.ir.module.downstream import Downstream, combinational
 class ExternalSRAM(ExternalSV):
     '''External SystemVerilog SRAM module.'''
 
-    address: Input[Bits(9)]
-    wd: Input[Bits(32)]
-    banksel: Input[Bits(1)]
-    read: Input[Bits(1)]
-    write: Input[Bits(1)]
+    address: WireIn[Bits(9)]
+    wd: WireIn[Bits(32)]
+    banksel: WireIn[Bits(1)]
+    read: WireIn[Bits(1)]
+    write: WireIn[Bits(1)]
 
-    dataout: Output[Bits(32)]
+    dataout: WireOut[Bits(32)]
 
     __source__: str = "python/unit-tests/resources/sram.sv"
     __module_name__: str = "sram"

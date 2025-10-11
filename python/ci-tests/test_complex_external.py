@@ -6,9 +6,9 @@ import assassyn
 class ExternalAdder(ExternalSV):
     '''External SystemVerilog adder module.'''
 
-    a: Input[UInt(32)]
-    b: Input[UInt(32)]
-    c: Output[UInt(32)]
+    a: WireIn[UInt(32)]
+    b: WireIn[UInt(32)]
+    c: WireOut[UInt(32)]
 
     __source__: str = "python/ci-tests/resources/adder.sv"
     __module_name__: str = "adder"
@@ -18,8 +18,8 @@ class ExternalAdder(ExternalSV):
 class ExternalRegister(ExternalSV):
     '''External SystemVerilog Reg.'''
 
-    reg_in: Input[Bits(32)]
-    reg_out: Output[Bits(32)]
+    reg_in: WireIn[Bits(32)]
+    reg_out: RegOut[Bits(32)]
 
     __source__: str = "python/ci-tests/resources/reg.sv"
     __module_name__: str = "register"
@@ -48,7 +48,7 @@ class Adder(Module):
 
         ext_reg =  ExternalRegister()
         ext_reg.in_assign(reg_in=ext_adder.c.bitcast(Bits(32)))
-        log("reg out: {}", ext_reg.reg_out)
+        log("reg out: {}", ext_reg.reg_out[0])
 
 class Driver(Module):
 
