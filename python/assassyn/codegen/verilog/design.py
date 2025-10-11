@@ -84,9 +84,12 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         self.name_counters = defaultdict(int)
         # Track external module usage for downstream modules
         self.external_wire_assignments = []
+        self.external_wire_assignment_keys = set()
+        self.external_wire_outputs = {}
         self.pending_external_inputs = defaultdict(list)
         self.instantiated_external_modules = set()
         self.external_modules = []
+        self.module_ctx = None
 
     def get_pred(self) -> str:
         """Get the current predicate for conditional execution."""
@@ -118,6 +121,15 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
         attrs = getattr(module, '_attrs', None)
         return attrs is not None and Module.ATTR_EXTERNAL in attrs
+
+    @staticmethod
+    def is_stub_external(module: Module) -> bool:
+        """Return True if the module has no generated body and acts as a pure external stub."""
+        if not CIRCTDumper._is_external_module(module):
+            return False
+        body = getattr(module, "body", None)
+        body_insts = getattr(body, "body", []) if body is not None else []
+        return not body_insts
 
 
     def dump_rval(self, node, with_namespace: bool, module_name: str = None) -> str:
@@ -224,10 +236,11 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         self._exposes = {}
         self.cond_stack = []
         self.current_module = node
+        previous_module_ctx = self.module_ctx
+        self.module_ctx = node
         self.exposed_ports_to_add = []
         self.finish_body = []
         self.finish_conditions = []
-        self.external_wire_assignments = []
         self.pending_external_inputs.clear()
         self.instantiated_external_modules.clear()
 
@@ -269,6 +282,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             self.code.extend(construct_method_body)
         self.indent -= 4
         self.append_code('')
+        self.module_ctx = previous_module_ctx
 
     def _walk_expressions(self, block: Block):
         """Recursively walks a block and yields all expressions."""
@@ -366,7 +380,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
     def _generate_external_module_wrapper(self, ext_module: ExternalSV):
         """Generate a PyCDE wrapper class for an external module."""
-        class_name = namify(ext_module.name)
+        class_name = f"{namify(ext_module.name)}_ffi"
         module_name = getattr(ext_module, 'external_module_name', class_name)
 
         self.append_code(f'class {class_name}(Module):')
@@ -474,6 +488,7 @@ def sramBlackbox_{array_name}():
 ''')
         dumper.visit_system(sys)
         code = '\n'.join(dumper.code)
+        code = code.replace('system.compile()")', 'system.compile()')
         fd.write(code)
     logs = dumper.logs
     return logs

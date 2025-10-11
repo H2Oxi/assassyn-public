@@ -37,8 +37,11 @@ class ElaborateModule(Visitor):
         self.module_ctx = None
         self.callback_metadata = callback_metadata
         self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
-        self.current_external_modules: set[str] = set()
-        self.pending_eval: dict[str, bool] = {}
+
+    @staticmethod
+    def _has_body(module: Module) -> bool:
+        body = getattr(module, "body", None)
+        return body is not None and bool(getattr(body, "body", []))
 
     def _lookup_external_port(self, module_name: str, wire_name: str, direction: str):
         """Return the FFI port spec for the given external wire, if available."""
@@ -57,10 +60,8 @@ class ElaborateModule(Visitor):
         """Visit a module and generate its implementation."""
         self.module_name = node.name
         self.module_ctx = node
-        self.current_external_modules = set()
-        self.pending_eval = {}
 
-        if isinstance(node, ExternalSV):
+        if isinstance(node, ExternalSV) and not self._has_body(node):
             return self.visit_external_module(node)
 
         result = [f"\n// Elaborating module {self.module_name}"]
@@ -69,15 +70,6 @@ class ElaborateModule(Visitor):
         self.indent += 2
         body = self.visit_block(node.body)
         result.append(body)
-
-        if self.current_external_modules:
-            indent_str = " " * self.indent
-            for ext_module in sorted(self.current_external_modules):
-                spec = self.external_specs.get(ext_module)
-                if spec is None or not getattr(spec, "has_clock", False):
-                    continue
-                handle_field = external_handle_field(ext_module)
-                result.append(f"{indent_str}sim.{handle_field}.clock_tick();")
 
         self.indent -= 2
         result.append(" true }")
@@ -103,10 +95,6 @@ class ElaborateModule(Visitor):
         handle_field = external_handle_field(owner.name)
         method_suffix = namify(wire_name)
 
-        self.current_external_modules.add(owner.name)
-        if not getattr(spec, "has_clock", False):
-            self.pending_eval[owner.name] = True
-
         return (
             f"// External wire assign: {owner.name}.{wire_name}\n"
             f"sim.{handle_field}.set_{method_suffix}("
@@ -128,11 +116,7 @@ class ElaborateModule(Visitor):
         method_suffix = namify(wire_name)
         rust_ty = dtype_to_rust_type(node.dtype)
 
-        eval_line = ""
-        if not getattr(spec, "has_clock", False) and self.pending_eval.pop(owner.name, False):
-            eval_line = f"  sim.{handle_field}.eval();\n"
-
-        self.current_external_modules.add(owner.name)
+        eval_line = f"  sim.{handle_field}.eval();\n"
 
         return (
             "{\n"

@@ -24,11 +24,16 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
     condition_snippets = []
     module_name = namify(dumper.current_module.name)
 
+    def _sanitize(name: str) -> str:
+        if name.startswith("self."):
+            name = name[5:]
+        return name.replace(".", "_")
+
     for i in expr.operands[1:]:
         operand = unwrap_operand(i)
         if not isinstance(operand, Const):
             dumper.expose('expr', operand)
-            exposed_name = dumper.dump_rval(operand, True)
+            exposed_name = _sanitize(dumper.dump_rval(operand, True))
             valid_signal = f'dut.{module_name}.valid_{exposed_name}.value'
             condition_snippets.append(valid_signal)
 
@@ -80,7 +85,7 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
             final_conditions.append(tb_cond_path)
 
         elif isinstance(cond_obj, CondBlock):
-            exposed_name = dumper.dump_rval(cond_obj.cond, True)
+            exposed_name = _sanitize(dumper.dump_rval(cond_obj.cond, True))
 
             tb_expose_path = f"(dut.{module_name}.expose_{exposed_name}.value)"
             tb_valid_path = f"(dut.{module_name}.valid_{exposed_name}.value)"

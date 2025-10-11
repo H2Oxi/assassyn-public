@@ -10,6 +10,7 @@ from typing import Dict, Optional
 
 from ...builder import Singleton
 from ..dtype import DType
+from ..block import Block
 from ..expr import wire_assign, wire_read
 from .downstream import Downstream
 from .module import Module, Wire
@@ -129,8 +130,31 @@ class DirectionalWires:
         return iter(self.keys())
 
     def __getitem__(self, key):
+        self._module._apply_pending_connections()
         wire = self._get_wire(key)
         if self._direction == 'output':
+            builder = Singleton.builder
+            if builder is None:
+                raise RuntimeError(
+                    "External wire access requires an active SysBuilder context"
+                )
+            needs_context = (
+                builder.current_module is None
+                or builder.current_block is None
+            )
+            if needs_context:
+                module = self._module
+                if module.body is None:
+                    module.body = Block(Block.MODULE_ROOT)
+                    module.body.parent = module
+                    module.body.module = module
+                builder.enter_context_of('module', module)
+                builder.enter_context_of('block', module.body)
+                try:
+                    return wire_read(wire)
+                finally:
+                    builder.exit_context_of('block')
+                    builder.exit_context_of('module')
             return wire_read(wire)
         return wire.value
 
@@ -225,15 +249,35 @@ class ExternalSV(Downstream):
         self.in_wires = DirectionalWires(self, 'input')
         self.out_wires = DirectionalWires(self, 'output')
 
-        for wire_name, value in wire_connections.items():
-            wire_obj = self._wires.get(wire_name)
-            if wire_obj is None:
-                raise KeyError(f"Cannot assign to undefined wire '{wire_name}'")
-            if wire_obj.direction != 'input':
-                raise ValueError(
-                    "Cannot assign to output wire "
-                    f"'{wire_name}' during initialization"
-                )
+        self._pending_wire_connections = None
+        if wire_connections:
+            validated = {}
+            for wire_name, value in wire_connections.items():
+                wire_obj = self._wires.get(wire_name)
+                if wire_obj is None:
+                    raise KeyError(
+                        f"Cannot assign to undefined wire '{wire_name}'"
+                    )
+                if wire_obj.direction != 'input':
+                    raise ValueError(
+                        "Cannot assign to output wire "
+                        f"'{wire_name}' during initialization"
+                    )
+                validated[wire_name] = value
+            if validated:
+                self._pending_wire_connections = validated
+
+    def _apply_pending_connections(self):
+        '''Apply any deferred constructor assignments when context is available.'''
+        if not self._pending_wire_connections:
+            return
+        builder = Singleton.builder
+        if builder is None or builder.current_module is None or builder.current_block is None:
+            return
+        assignments = self._pending_wire_connections
+        self._pending_wire_connections = None
+        for wire_name, value in assignments.items():
+            wire_obj = self._wires[wire_name]
             wire_assign(wire_obj, value)
             wire_obj.assign(value)
 
@@ -263,10 +307,31 @@ class ExternalSV(Downstream):
         Args:
             **kwargs: Wire name to value mappings (e.g., a=value, b=value)
         '''
-        for wire_name, value in kwargs.items():
-            self.in_wires[wire_name] = value
+        builder = Singleton.builder
+        if builder is None:
+            raise RuntimeError(
+                "ExternalSV.in_assign requires an active SysBuilder context"
+            )
 
-        outputs = [self.out_wires[name] for name in self.out_wires]
+        self._apply_pending_connections()
+
+        if self.body is None:
+            self.body = Block(Block.MODULE_ROOT)
+            self.body.parent = self
+            self.body.module = self
+
+        builder.enter_context_of('module', self)
+        builder.enter_context_of('block', self.body)
+
+        try:
+            for wire_name, value in kwargs.items():
+                self.in_wires[wire_name] = value
+
+            outputs = [self.out_wires[name] for name in self.out_wires]
+        finally:
+            builder.exit_context_of('block')
+            builder.exit_context_of('module')
+
         if not outputs:
             return None
         if len(outputs) == 1:
