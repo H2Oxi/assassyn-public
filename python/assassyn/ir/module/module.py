@@ -228,7 +228,7 @@ combinational = combinational_for(Module)
 class Wire:
     '''A wire for connecting to external modules.'''
 
-    def __init__(self, dtype, direction=None, module=None):
+    def __init__(self, dtype, direction=None, module=None, kind: str = 'wire'):
         if dtype is not None:
             assert isinstance(dtype, DType)
         self.dtype = dtype
@@ -239,6 +239,7 @@ class Wire:
         self.module = module  # Owning external module
         # For backward compatibility, treat the owning module as parent
         self.parent = module
+        self.kind = kind  # 'wire' (default) or 'reg' for registered outputs
 
     @property
     def users(self):
@@ -247,7 +248,8 @@ class Wire:
 
     def __repr__(self):
         dir_str = f", {self.direction}" if self.direction else ""
-        return f'Wire<{self.dtype}{dir_str}>'
+        kind_str = f", {self.kind}" if self.kind and self.kind != 'wire' else ""
+        return f'Wire<{self.dtype}{dir_str}{kind_str}>'
 
     def assign(self, value):
         '''Assign a value to this wire (for input wires).'''

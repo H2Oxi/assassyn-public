@@ -18,10 +18,19 @@ from .module import Module, Wire
 
 @dataclass(frozen=True)
 class _WireAnnotation:
-    '''Descriptor returned by `Input[...]`/`Output[...]` annotations.'''
+    '''Descriptor returned by `WireIn[...]`/`WireOut[...]` annotations.'''
 
     direction: str
     dtype: DType
+    wire_kind: str = 'wire'
+
+
+@dataclass(frozen=True)
+class _ExternalWireDecl:
+    '''Normalized wire declaration metadata for ExternalSV.'''
+
+    dtype: DType
+    kind: str = 'wire'
 
 
 @dataclass(frozen=True)
@@ -33,26 +42,43 @@ class _ExternalConfig:
     has_clock: bool
     has_reset: bool
     no_arbiter: bool
-    in_wires: Dict[str, DType]
-    out_wires: Dict[str, DType]
+    in_wires: Dict[str, _ExternalWireDecl]
+    out_wires: Dict[str, _ExternalWireDecl]
 
 
-class Input:
-    '''Annotation helper for declaring ExternalSV inputs.'''
-
-    def __class_getitem__(cls, dtype: DType) -> _WireAnnotation:
-        if not isinstance(dtype, DType):
-            raise TypeError("Input[...] expects an assassyn dtype instance")
-        return _WireAnnotation('input', dtype)
-
-
-class Output:
-    '''Annotation helper for declaring ExternalSV outputs.'''
+class WireIn:
+    '''Annotation helper for declaring ExternalSV wire inputs.'''
 
     def __class_getitem__(cls, dtype: DType) -> _WireAnnotation:
         if not isinstance(dtype, DType):
-            raise TypeError("Output[...] expects an assassyn dtype instance")
-        return _WireAnnotation('output', dtype)
+            raise TypeError("WireIn[...] expects an assassyn dtype instance")
+        return _WireAnnotation('input', dtype, 'wire')
+
+
+class WireOut:
+    '''Annotation helper for declaring ExternalSV combinational outputs.'''
+
+    def __class_getitem__(cls, dtype: DType) -> _WireAnnotation:
+        if not isinstance(dtype, DType):
+            raise TypeError("WireOut[...] expects an assassyn dtype instance")
+        return _WireAnnotation('output', dtype, 'wire')
+
+
+class RegOut:
+    '''Annotation helper for declaring ExternalSV registered outputs.'''
+
+    def __class_getitem__(cls, dtype: DType) -> _WireAnnotation:
+        if not isinstance(dtype, DType):
+            raise TypeError("RegOut[...] expects an assassyn dtype instance")
+        return _WireAnnotation('output', dtype, 'reg')
+
+
+class Input(WireIn):
+    '''Deprecated alias for WireIn for backward compatibility.'''
+
+
+class Output(WireOut):
+    '''Deprecated alias for WireOut for backward compatibility.'''
 
 
 def _ensure_property(cls, name: str, direction: str):
@@ -84,9 +110,9 @@ def external(cls):
     for name, annotation in annotations.items():
         if isinstance(annotation, _WireAnnotation):
             if annotation.direction == 'input':
-                in_wires[name] = annotation.dtype
+                in_wires[name] = _ExternalWireDecl(annotation.dtype, annotation.wire_kind)
             else:
-                out_wires[name] = annotation.dtype
+                out_wires[name] = _ExternalWireDecl(annotation.dtype, annotation.wire_kind)
             _ensure_property(cls, name, annotation.direction)
 
     file_path = getattr(cls, '__source__', None)
@@ -105,6 +131,95 @@ def external(cls):
         out_wires=out_wires,
     )
     return cls
+
+
+def _read_output_value(module: ExternalSV, wire: Wire):
+    '''Create a WireRead for an output wire, ensuring builder context exists.'''
+    builder = Singleton.builder
+    if builder is None:
+        raise RuntimeError(
+            "External wire access requires an active SysBuilder context"
+        )
+
+    needs_context = builder.current_module is None or builder.current_block is None
+    if needs_context:
+        if module.body is None:
+            module.body = Block(Block.MODULE_ROOT)
+            module.body.parent = module
+            module.body.module = module
+        builder.enter_context_of('module', module)
+        builder.enter_context_of('block', module.body)
+        try:
+            return wire_read(wire)
+        finally:
+            builder.exit_context_of('block')
+            builder.exit_context_of('module')
+    return wire_read(wire)
+
+
+def _as_external_decl(spec, default_kind='wire') -> _ExternalWireDecl:
+    '''Normalize user-provided wire declarations into `_ExternalWireDecl`.'''
+    if isinstance(spec, _ExternalWireDecl):
+        return spec
+    if isinstance(spec, _WireAnnotation):
+        return _ExternalWireDecl(spec.dtype, getattr(spec, 'wire_kind', default_kind))
+
+    dtype = None
+    kind = default_kind
+
+    if isinstance(spec, dict):
+        dtype = spec.get('dtype')
+        kind = spec.get('kind', default_kind)
+    elif isinstance(spec, (tuple, list)):
+        if not spec:
+            raise ValueError("External wire declaration tuple cannot be empty")
+        dtype = spec[0]
+        if len(spec) > 1:
+            kind = spec[1]
+    else:
+        dtype = spec
+
+    if not isinstance(dtype, DType):
+        raise TypeError("ExternalSV wire declarations must use assassyn dtypes")
+    if kind not in ('wire', 'reg'):
+        raise ValueError(f"Unsupported ExternalSV wire kind '{kind}'")
+    return _ExternalWireDecl(dtype, kind)
+
+
+def _normalize_decl_map(wire_map, default_kind='wire'):
+    '''Normalize a mapping of wire declarations.'''
+    if not wire_map:
+        return {}
+    return {
+        name: _as_external_decl(spec, default_kind)
+        for name, spec in wire_map.items()
+    }
+
+
+class _ExternalRegOutProxy:
+    '''Lightweight proxy that exposes read-only register semantics via indexing.'''
+
+    def __init__(self, module: ExternalSV, wire: Wire):
+        self._module = module
+        self._wire = wire
+
+    def __getitem__(self, index):
+        if isinstance(index, int):
+            if index != 0:
+                raise IndexError("External RegOut only supports index 0")
+        else:
+            raise TypeError("External RegOut expects an integer index (0)")
+        return _read_output_value(self._module, self._wire)
+
+    @property
+    def dtype(self):
+        '''Return the dtype of the underlying register output.'''
+        return self._wire.dtype
+
+    def __repr__(self):
+        module_name = getattr(self._module, 'name', type(self._module).__name__)
+        wire_name = getattr(self._wire, 'name', '<unnamed>')
+        return f'<RegOutProxy {module_name}.{wire_name}>'
 
 
 class DirectionalWires:
@@ -133,29 +248,10 @@ class DirectionalWires:
         self._module._apply_pending_connections()
         wire = self._get_wire(key)
         if self._direction == 'output':
-            builder = Singleton.builder
-            if builder is None:
-                raise RuntimeError(
-                    "External wire access requires an active SysBuilder context"
-                )
-            needs_context = (
-                builder.current_module is None
-                or builder.current_block is None
-            )
-            if needs_context:
-                module = self._module
-                if module.body is None:
-                    module.body = Block(Block.MODULE_ROOT)
-                    module.body.parent = module
-                    module.body.module = module
-                builder.enter_context_of('module', module)
-                builder.enter_context_of('block', module.body)
-                try:
-                    return wire_read(wire)
-                finally:
-                    builder.exit_context_of('block')
-                    builder.exit_context_of('module')
-            return wire_read(wire)
+            self._module._ensure_output_exposed(wire)
+            if getattr(wire, 'kind', 'wire') == 'reg':
+                return _ExternalRegOutProxy(self._module, wire)
+            return _read_output_value(self._module, wire)
         return wire.value
 
     def __setitem__(self, key, value):
@@ -233,18 +329,23 @@ class ExternalSV(Downstream):
         self._attrs[Module.ATTR_EXTERNAL] = True
 
         self._wires = {}
+        self._exposed_output_reads = {}
 
-        def _register_wire(name, dtype, direction):
-            wire = Wire(dtype, direction, self)
+        decl_in_wires = _normalize_decl_map(in_wires, 'wire')
+        decl_out_wires = _normalize_decl_map(out_wires, 'wire')
+
+        def _register_wire(name, dtype, direction, kind):
+            wire = Wire(dtype, direction, self, kind=kind)
             wire.name = name
             self._wires[name] = wire
 
-        if in_wires:
-            for wire_name, dtype in in_wires.items():
-                _register_wire(wire_name, dtype, 'input')
-        if out_wires:
-            for wire_name, dtype in out_wires.items():
-                _register_wire(wire_name, dtype, 'output')
+        self._declared_in_wires = decl_in_wires
+        self._declared_out_wires = decl_out_wires
+
+        for wire_name, decl in decl_in_wires.items():
+            _register_wire(wire_name, decl.dtype, 'input', decl.kind)
+        for wire_name, decl in decl_out_wires.items():
+            _register_wire(wire_name, decl.dtype, 'output', decl.kind)
 
         self.in_wires = DirectionalWires(self, 'input')
         self.out_wires = DirectionalWires(self, 'output')
@@ -280,6 +381,42 @@ class ExternalSV(Downstream):
             wire_obj = self._wires[wire_name]
             wire_assign(wire_obj, value)
             wire_obj.assign(value)
+
+    def _ensure_output_exposed(self, wire: Wire):
+        '''Guarantee a WireRead exists in this module for the given output wire.'''
+        if wire in self._exposed_output_reads:
+            return self._exposed_output_reads[wire]
+
+        builder = Singleton.builder
+        if builder is None:
+            raise RuntimeError(
+                "External wire access requires an active SysBuilder context"
+            )
+
+        need_context = (
+            builder.current_module is not self
+            or builder.current_block is None
+            or getattr(builder.current_block, 'module', None) is not self
+        )
+
+        if self.body is None:
+            self.body = Block(Block.MODULE_ROOT)
+            self.body.parent = self
+            self.body.module = self
+
+        if need_context:
+            builder.enter_context_of('module', self)
+            builder.enter_context_of('block', self.body)
+
+        try:
+            expr = wire_read(wire)
+        finally:
+            if need_context:
+                builder.exit_context_of('block')
+                builder.exit_context_of('module')
+
+        self._exposed_output_reads[wire] = expr
+        return expr
 
     @property
     def wires(self):
