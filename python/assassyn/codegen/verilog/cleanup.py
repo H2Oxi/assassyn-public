@@ -11,6 +11,7 @@ from ...ir.memory.sram import SRAM
 from ...ir.array import Array, Slice
 from ...ir.const import Const
 from ...ir.expr import (
+    Expr,
     ArrayWrite,
     ArrayRead,
     FIFOPush,
@@ -261,7 +262,14 @@ def cleanup_post_generation(dumper):
             if isinstance(unwrap_operand(expr), Const):
                 continue
             rval = dumper.dump_rval(expr, False)
-            exposed_name = dumper.dump_rval(expr, True)
+            if (
+                isinstance(expr, Expr)
+                and hasattr(dumper.current_module, "externals")
+                and expr in dumper.current_module.externals
+            ):
+                exposed_name = dumper.get_external_port_name(expr)
+            else:
+                exposed_name = dumper.dump_rval(expr, True)
             if not isinstance(key,ArrayWrite ):
                 dtype_str = dump_type(expr.dtype)
             else :

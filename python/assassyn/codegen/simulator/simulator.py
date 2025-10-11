@@ -90,10 +90,18 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     fd.write("use sim_runtime::num_bigint::{BigInt, BigUint};\n")
     fd.write("use sim_runtime::rand::seq::SliceRandom;\n\n")
 
+    def _is_stub_external(module):
+        if not isinstance(module, ExternalSV):
+            return False
+        body = getattr(module, "body", None)
+        body_insts = getattr(body, "body", []) if body is not None else []
+        return not body_insts
+
     # Initialize data structures
     simulator_init = []
     downstream_reset = []
     registers = []
+    external_clock_handles = []
     external_specs = {spec.original_module_name: spec for spec in config.get('external_ffis', [])}
 
     # Begin simulator struct definition
@@ -158,6 +166,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
                 field_type = f"{spec.crate_name}::{spec.struct_name}"
                 fd.write(f"pub {handle_field} : {field_type}, ")
                 simulator_init.append(f"{handle_field} : {field_type}::new(),")
+                if getattr(spec, "has_clock", False):
+                    external_clock_handles.append(handle_field)
             else:
                 fd.write(f"pub {handle_field} : (), ")
                 simulator_init.append(f"{handle_field} : (),")
@@ -207,6 +217,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     fd.write("  pub fn tick_registers(&mut self) {\n")
     for reg in registers:
         fd.write(f"    self.{reg}.tick(self.stamp);\n")
+    for handle in external_clock_handles:
+        fd.write(f"    self.{handle}.clock_tick();\n")
     fd.write("  }\n\n")
 
     # Get topological order for downstream modules
@@ -216,7 +228,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Module simulation functions
     simulators = []
     for module in sys.modules[:] + sys.downstreams[:]:
-        if isinstance(module, ExternalSV):
+        if _is_stub_external(module):
             continue
         module_name = namify(module.name)
         fd.write(f"  fn simulate_{module_name}(&mut self) {{\n")
@@ -297,7 +309,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Add simulators for downstream modules
     fd.write("  let downstreams : Vec<fn(&mut Simulator)> = vec![")
     for downstream in downstreams:
-        if isinstance(downstream, ExternalSV):
+        if _is_stub_external(downstream):
             continue
         module_name = downstream.name
         fd.write(f"Simulator::simulate_{module_name}, ")
