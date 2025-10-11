@@ -38,7 +38,7 @@ class DirectionalWires:
 
 The `ExternalSV` class extends the base `Module` class to integrate external SystemVerilog modules into Assassyn's IR.
 
-**Purpose:** Provides a seamless interface for incorporating pre-existing SystemVerilog modules into Assassyn designs, handling wire declarations, assignments, and code generation.
+- **Constructor surface**: Alongside the usual `file_path`, `module_name`, and optional `has_clock`/`has_reset` switches, callers can still spell out the boundary via explicit `in_wires`/`out_wires` dictionaries. In day-to-day code, the preferred path is to decorate subclasses with `@external` and declare ports through annotations: `WireIn[...]` for inputs, `WireOut[...]` for direct combinational outputs, and `RegOut[...]` for registered outputs that are consumed like read-only `RegArray` handles.
 
 **Member Fields:**
 - `file_path: str` - Path to the SystemVerilog source file
@@ -49,7 +49,7 @@ The `ExternalSV` class extends the base `Module` class to integrate external Sys
 - `in_wires: DirectionalWires` - Adapter for input wire access
 - `out_wires: DirectionalWires` - Adapter for output wire access
 
-**Methods:**
+- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns typed handles. `WireOut` ports immediately create `WireRead` values, while `RegOut` ports return a small proxy that must be indexed (e.g. `external_reg.reg_out[0]`) to record the read. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
 
 #### `__init__(self, file_path, in_wires=None, out_wires=None, module_name=None, no_arbiter=False, has_clock=False, has_reset=False, **wire_connections)`
 
@@ -78,10 +78,24 @@ Allows assignment to wires using bracket notation. Delegates to the appropriate 
 
 #### `__getitem__(self, key)`
 
-**Explanation:**
-Allows access to wires using bracket notation. Checks output wires first, then input wires. Raises `KeyError` if the wire is not found.
+1. **Define the external block**:
+   ```python
+   @external
+   class ExternalAdder(ExternalSV):
+       a: WireIn[UInt(32)]
+       b: WireIn[UInt(32)]
+       c: WireOut[UInt(32)]
 
-#### `in_assign(self, **kwargs)`
+       __source__ = "python/ci-tests/resources/adder.sv"
+       __module_name__ = "adder"
+   ```
+   The annotations declare each port, and the decorator resolves `__source__`/`__module_name__` into the configuration that `ExternalSV` consumes.
+
+2. **Drive inputs and read outputs** inside a downstream module:
+   ```python
+   c = ext_adder.in_assign(a=a, b=b)
+   ```
+   `in_assign` records the two input connections via `WireAssign` and returns the single declared `WireOut` (`WireRead`), making the value immediately usable.
 
 **Explanation:**
 Convenience method for assigning values to multiple input wires using keyword arguments. The method:

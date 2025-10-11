@@ -39,35 +39,52 @@ def codegen_wire_assign(dumper, expr: WireAssign) -> Optional[str]:
     return f"# External wire assign: {expr}"
 
 
+def register_external_wire_read(dumper, expr: WireRead):
+    """Register bookkeeping for external wire reads without emitting code."""
+    wire = expr.wire
+    owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
+    if not isinstance(owner, ExternalSV):
+        return owner
+
+    dumper.expose('expr', expr)
+
+    if dumper.current_module is not owner:
+        module_externals = getattr(dumper.module_ctx, 'externals', None)
+        if module_externals is not None and expr not in module_externals:
+            module_externals.setdefault(expr, [])
+        port_name = dumper.get_external_port_name(expr)
+        key = (dumper.current_module, expr)
+        if key not in dumper.external_wire_assignment_keys:
+            dumper.external_wire_assignment_keys.add(key)
+            dumper.external_wire_assignments.append({
+                'consumer': dumper.current_module,
+                'producer': owner,
+                'wire': wire,
+                'expr': expr,
+                'port_name': port_name,
+            })
+    else:
+        dumper.external_wire_outputs[wire] = dumper.get_external_port_name(expr)
+
+    return owner
+
+
 def codegen_wire_read(dumper, expr: WireRead) -> Optional[str]:
     """Generate code for wire read operations."""
     # Document reads from external module outputs and emit the assignment
     dumper.append_code(f'# External wire read: {expr}')
     wire = expr.wire
-    owner = getattr(wire, 'parent', None) or getattr(wire, 'module', None)
     wire_name = getattr(wire, 'name', None)
     rval = dumper.dump_rval(expr, False)
 
-    if isinstance(owner, ExternalSV):
-        dumper.expose('expr', expr)
+    owner = register_external_wire_read(dumper, expr)
 
+    if isinstance(owner, ExternalSV):
         if dumper.current_module is not owner:
-            if expr not in getattr(dumper.module_ctx, 'externals', {}):
-                dumper.module_ctx.externals.setdefault(expr, [])
             port_name = dumper.get_external_port_name(expr)
-            key = (dumper.current_module, expr)
-            if key not in dumper.external_wire_assignment_keys:
-                dumper.external_wire_assignment_keys.add(key)
-                dumper.external_wire_assignments.append({
-                    'consumer': dumper.current_module,
-                    'producer': owner,
-                    'wire': wire,
-                    'expr': expr,
-                })
+            if rval == f"self.{port_name}":
+                return None
             return f"{rval} = self.{port_name}"
-        else:
-            if wire is not None and wire_name is not None:
-                dumper.external_wire_outputs[wire] = dumper.get_external_port_name(expr)
 
         if owner not in dumper.instantiated_external_modules:
             ext_module_name = f"{namify(owner.name)}_ffi"
