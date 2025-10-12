@@ -269,6 +269,10 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
         restore_indent = self.indent
 
         if isinstance(node, CondBlock):
+            if isinstance(node.cond, Expr):
+                cond_code = self.visit_expr(node.cond)
+                if cond_code:
+                    result.append(cond_code)
             cond = dump_rval_ref(self.module_ctx, self.sys, node.cond)
             result.append(f"if {cond} {{\n")
             self.indent += 2
@@ -348,6 +352,13 @@ use std::sync::Arc;
         ));
     }}
 }}
+
+""")
+        else:
+            mod_fd.write("""extern "C" fn rust_callback(req: *mut Request, ctx: *mut c_void) {
+    let _ = req;
+    let _ = ctx;
+}
 
 """)
 

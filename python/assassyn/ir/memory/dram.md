@@ -17,4 +17,4 @@ Unlike [SRAM](./sram.py), the data should be handled as soon as response,
 we extend several [intrinsics](../../ir/expr/intrinsic.py) to achieve this.
 Refer to its memory section for more details.
 
-It calls and `send_read_request(self, addr, re)` and `send_write_request(self, addr, data, we)`.
+It calls `send_read_request(self, re, addr)` and `send_write_request(self, we, addr, wdata)`.
