@@ -169,7 +169,8 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
         "#[allow(non_camel_case_types)]",
         "pub struct ModuleHandle { _private: [u8; 0] }",
         "",
-        "const LIB_PATH: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/.verilator-lib-path\"));",
+        "const LIB_PATH: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), "
+        "\"/.verilator-lib-path\"));",
         "",
         "fn lib_path() -> PathBuf {",
         "    PathBuf::from(LIB_PATH.trim())",
@@ -177,11 +178,18 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
         "",
         "fn load_library<P: AsRef<Path>>(path: P) -> Library {",
         "    let path = path.as_ref();",
-        f"    unsafe {{ Library::new(path) }}.unwrap_or_else(|err| panic!(\"failed to load Verilator library '{prefix}': {{err}} ({{}})\", path.display()))",
+        (
+            "    unsafe { Library::new(path) }."
+            "unwrap_or_else(|err| panic!(\"failed to load Verilator library '"
+            f"{prefix}': {{err}} ({{}})\", path.display()))"
+        ),
         "}",
         "",
         "unsafe fn load_symbol<T: Copy>(lib: &Library, symbol: &[u8], name: &str) -> T {",
-        "    *lib.get::<T>(symbol).unwrap_or_else(|err| panic!(\"failed to load symbol {name}: {err}\"))",
+        (
+            "    *lib.get::<T>(symbol).unwrap_or_else(|err| "
+            "panic!(\"failed to load symbol {name}: {err}\"))"
+        ),
         "}",
         "",
         f"pub struct {struct_name} {{",
@@ -199,11 +207,17 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
         lines.append("    rst_state: u8,")
     for port in crate.inputs:
         lines.append(
-            f"    set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, {port.rust_type}),"
+            (
+                f"    set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, "
+                f"{port.rust_type}),"
+            )
         )
     for port in crate.outputs:
         lines.append(
-            f"    get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> {port.rust_type},"
+            (
+                f"    get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> "
+                f"{port.rust_type},"
+            )
         )
     lines.append("}")
     lines.append("")
@@ -218,29 +232,55 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:
         "    pub fn new_from_path<P: AsRef<Path>>(path: P) -> Self {",
         "        let lib = load_library(path);",
         "        unsafe {",
-        f"            let new_fn: unsafe extern \"C\" fn() -> *mut ModuleHandle = load_symbol(&lib, b\"{prefix}_new\", \"{prefix}_new\");",
-        f"            let free_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = load_symbol(&lib, b\"{prefix}_free\", \"{prefix}_free\");",
-        f"            let eval_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = load_symbol(&lib, b\"{prefix}_eval\", \"{prefix}_eval\");",
+        (
+            "            let new_fn: unsafe extern \"C\" fn() -> *mut ModuleHandle = "
+            f"load_symbol(&lib, b\"{prefix}_new\", \"{prefix}_new\");"
+        ),
+        (
+            "            let free_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = "
+            f"load_symbol(&lib, b\"{prefix}_free\", \"{prefix}_free\");"
+        ),
+        (
+            "            let eval_fn: unsafe extern \"C\" fn(*mut ModuleHandle) = "
+            f"load_symbol(&lib, b\"{prefix}_eval\", \"{prefix}_eval\");"
+        ),
     ]
 
     if crate.has_clock:
         impl_lines.append(
-            f"            let set_clk_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = load_symbol(&lib, b\"{prefix}_set_clk\", \"{prefix}_set_clk\");"
+            (
+                "            let set_clk_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = "
+                f"load_symbol(&lib, b\"{prefix}_set_clk\", \"{prefix}_set_clk\");"
+            )
         )
     if crate.has_reset:
         impl_lines.append(
-            f"            let set_rst_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = load_symbol(&lib, b\"{prefix}_set_rst\", \"{prefix}_set_rst\");"
+            (
+                "            let set_rst_fn: unsafe extern \"C\" fn(*mut ModuleHandle, u8) = "
+                f"load_symbol(&lib, b\"{prefix}_set_rst\", \"{prefix}_set_rst\");"
+            )
         )
     for port in crate.inputs:
         impl_lines.append(
-            f"            let set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, {port.rust_type}) = load_symbol(&lib, b\"{prefix}_set_{port.name}\", \"{prefix}_set_{port.name}\");"
+            (
+                f"            let set_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle, "
+                f"{port.rust_type}) = load_symbol(&lib, b\"{prefix}_set_{port.name}\", "
+                f"\"{prefix}_set_{port.name}\");"
+            )
         )
     for port in crate.outputs:
         impl_lines.append(
-            f"            let get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> {port.rust_type} = load_symbol(&lib, b\"{prefix}_get_{port.name}\", \"{prefix}_get_{port.name}\");"
+            (
+                f"            let get_{port.name}_fn: unsafe extern \"C\" fn(*mut ModuleHandle) -> "
+                f"{port.rust_type} = load_symbol(&lib, b\"{prefix}_get_{port.name}\", "
+                f"\"{prefix}_get_{port.name}\");"
+            )
         )
     impl_lines.append(
-        f"            let handle = NonNull::new(new_fn()).unwrap_or_else(|| panic!(\"{prefix}_new returned null\"));"
+        (
+            "            let handle = NonNull::new(new_fn())."
+            f"unwrap_or_else(|| panic!(\"{prefix}_new returned null\"));"
+        )
     )
     impl_lines.append("            let mut instance = Self {")
     impl_lines.append("                lib,")
@@ -418,7 +458,7 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _build_verilator_library(crate: ExternalFFIModule) -> Path:
+def _build_verilator_library(crate: ExternalFFIModule) -> Path:  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
     """Compile the Verilator-generated model and wrapper into a shared library."""
 
     crate_path = crate.crate_path
@@ -447,7 +487,8 @@ def _build_verilator_library(crate: ExternalFFIModule) -> Path:
     verilator_root = os.environ.get("VERILATOR_ROOT")
     if not verilator_root:
         raise EnvironmentError(
-            "VERILATOR_ROOT is not set. Please run 'source setup.sh' before generating external FFIs."
+            "VERILATOR_ROOT is not set. Please run 'source setup.sh' "
+            "before generating external FFIs."
         )
     verilator_root_path = Path(verilator_root)
     include_dir = verilator_root_path / "include"

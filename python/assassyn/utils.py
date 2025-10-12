@@ -80,8 +80,8 @@ def run_simulator(manifest_path, offline=False, release=True):
             raise
         try:
             return _run(True)
-        except subprocess.CalledProcessError:
-            raise err
+        except subprocess.CalledProcessError as retry_err:
+            raise err from retry_err
 
 def run_verilator(path):
     '''The helper function to run the verilator'''
