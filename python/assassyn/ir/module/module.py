@@ -27,7 +27,7 @@ class Timing:
         '''The helper function to convert the timing policy to string.'''
         return [None, 'systolic', 'backpressure'][value]
 
-class Module(ModuleBase):
+class Module(ModuleBase):  # pylint: disable=too-many-instance-attributes
     '''The AST node for defining a module.'''
 
     body: Block  # Body of the module
@@ -225,7 +225,7 @@ class Port:
 combinational = combinational_for(Module)
 
 
-class Wire:
+class Wire:  # pylint: disable=too-many-instance-attributes
     '''A wire for connecting to external modules.'''
 
     def __init__(self, dtype, direction=None, module=None, kind: str = 'wire'):

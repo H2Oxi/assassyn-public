@@ -22,7 +22,7 @@ if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
 
 
-class ElaborateModule(Visitor):
+class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
     """Visitor for elaborating modules with ExternalSV support."""
 
     def __init__(
@@ -43,8 +43,6 @@ class ElaborateModule(Visitor):
 
     def _collect_external_value_assignments(self, sys):
         """Precompute external input assignments keyed by producing expression."""
-        from ...ir.expr import WireAssign  # pylint: disable=import-outside-toplevel
-
         assignments = defaultdict(list)
 
         for module in getattr(sys, "downstreams", []):
@@ -53,22 +51,29 @@ class ElaborateModule(Visitor):
             body = getattr(module, "body", None)
             if body is None:
                 continue
-            stack = [body]
-            while stack:
-                block = stack.pop()
-                for elem in getattr(block, "body", []):
-                    if isinstance(elem, Block):
-                        stack.append(elem)
-                    elif isinstance(elem, WireAssign):
-                        value = unwrap_operand(elem.value)
-                        if isinstance(value, Expr):
-                            parent_block = getattr(value, "parent", None)
-                            producer_module = getattr(parent_block, "module", None)
-                            if producer_module is None:
-                                continue
-                            value_id = namify(value.as_operand())
-                            assignments[(producer_module, value_id)].append((module, elem.wire))
+            for assignment in self._iter_wire_assignments(body):
+                value = unwrap_operand(assignment.value)
+                if not isinstance(value, Expr):
+                    continue
+                parent_block = getattr(value, "parent", None)
+                producer_module = getattr(parent_block, "module", None)
+                if producer_module is None:
+                    continue
+                value_id = namify(value.as_operand())
+                assignments[(producer_module, value_id)].append((module, assignment.wire))
         return assignments
+
+    @staticmethod
+    def _iter_wire_assignments(root: Block):
+        """Yield ``WireAssign`` nodes from nested blocks."""
+        stack = [root]
+        while stack:
+            block = stack.pop()
+            for elem in getattr(block, "body", []):
+                if isinstance(elem, Block):
+                    stack.append(elem)
+                elif isinstance(elem, WireAssign):
+                    yield elem
 
     @staticmethod
     def _has_body(module: Module) -> bool:
@@ -108,7 +113,7 @@ class ElaborateModule(Visitor):
 
         return "\n".join(result)
 
-    def _codegen_external_wire_assign(self, node: WireAssign) -> str | None:
+    def _codegen_external_wire_assign(self, node: WireAssign) -> str | None:  # pylint: disable=too-many-locals
         wire = node.wire
         owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
         wire_name = getattr(wire, "name", None)
@@ -168,7 +173,7 @@ class ElaborateModule(Visitor):
             "}"
         )
 
-    def visit_expr(self, node: Expr):
+    def visit_expr(self, node: Expr):  # pylint: disable=too-many-locals
         """Visit an expression and generate its implementation."""
         from ._expr import codegen_expr  # pylint: disable=import-outside-toplevel
 
@@ -200,7 +205,16 @@ class ElaborateModule(Visitor):
                 'store': self.callback_metadata.store,
             }
 
-        code = custom_code if custom_code is not None else codegen_expr(node, self.module_ctx, self.sys, **kwargs)
+        code = (
+            custom_code
+            if custom_code is not None
+            else codegen_expr(
+                node,
+                self.module_ctx,
+                self.sys,
+                **kwargs,
+            )
+        )
 
         indent_str = " " * self.indent
         result = ""
@@ -216,7 +230,10 @@ class ElaborateModule(Visitor):
                 if need_exposure:
                     lines.append(f"{indent_str}sim.{id_expr}_value = Some({id_expr}.clone());")
                 key = (self.module_ctx, id_expr)
-                if key in self.external_value_assignments and key not in self.emitted_external_assignments:
+                if (
+                    key in self.external_value_assignments
+                    and key not in self.emitted_external_assignments
+                ):
                     assignments = self.external_value_assignments[key]
                     for ext_module, wire in assignments:
                         handle_field = external_handle_field(ext_module.name)
@@ -240,6 +257,7 @@ class ElaborateModule(Visitor):
         return result
 
     def visit_int_imm(self, int_imm):
+        """Render integer immediates as Rust ``ValueCastTo`` expressions."""
         ty = dump_rval_ref(self.module_ctx, self.sys, int_imm.dtype)
         value = int_imm.value
         return f"ValueCastTo::<{ty}>::cast(&{value})"
@@ -279,6 +297,7 @@ class ElaborateModule(Visitor):
         return "".join(result)
 
     def visit_external_module(self, node: ExternalSV):
+        """Emit a stub implementation for an external module."""
         module_id = namify(node.name)
         return (
             f"\n// External module {node.name} is driven via FFI handles\n"
