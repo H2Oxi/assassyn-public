@@ -293,6 +293,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
 
             # Reset externally used values on failure
             for expr in expr_validities:
+                if isinstance(expr, Bind):
+                    continue
                 if expr.parent.module == module:
                     name = namify(expr.as_operand())
                     fd.write(f"        self.{name}_value = None;\n")
