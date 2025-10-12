@@ -267,6 +267,16 @@ class DirectionalWires:
             if wire.direction == self._direction
         ]
 
+    def items(self):
+        """Iterate over (name, value) pairs for the selected direction."""
+        for name in self.keys():
+            yield name, self[name]
+
+    def values(self):
+        """Iterate over wire values for the selected direction."""
+        for _, value in self.items():
+            yield value
+
 
 class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
     '''An external block implemented in SystemVerilog.'''

@@ -8,6 +8,7 @@ This module contains helper functions to generate simulator code for intrinsic o
 
 from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic
 from ....utils import namify
+from ..utils import dtype_to_rust_type
 from ..callback_collector import get_current_callback_metadata
 from ..node_dumper import dump_rval_ref
 
@@ -81,51 +82,54 @@ def _codegen_barrier(node, module_ctx, sys, **_kwargs):
 
 def _codegen_send_read_request(node, module_ctx, sys, **_kwargs):
     """Generate code for SEND_READ_REQUEST intrinsic."""
-    idx = node.args[0]
-    idx_val = dump_rval_ref(module_ctx, sys, idx)
+    _, re, addr = node.args
+    re_val = dump_rval_ref(module_ctx, sys, re)
+    addr_val = dump_rval_ref(module_ctx, sys, addr)
     return f"""{{
-                    unsafe {{
-                        let mem_interface = &sim.mem_interface;
-                        let success = mem_interface.send_request(
-                            {idx_val} as i64,
-                            false,
-                            rust_callback,
-                            sim as *const _ as *mut _,
-                        );
-                        if success {{
-                            sim.request_stamp_map_table.insert(
-                                {idx_val} as i64,
-                                sim.stamp,
+                    if {re_val} {{
+                        unsafe {{
+                            let mem_interface = &sim.mem_interface;
+                            let success = mem_interface.send_request(
+                                {addr_val} as i64,
+                                false,
+                                crate::modules::rust_callback,
+                                sim as *const _ as *mut _,
                             );
+                            if success {{
+                                sim.request_stamp_map_table.insert(
+                                    {addr_val} as i64,
+                                    sim.stamp,
+                                );
+                            }}
+                            success
                         }}
-                        success
+                    }} else {{
+                        false
                     }}
                 }}"""
 
 
 def _codegen_send_write_request(node, module_ctx, sys, **_kwargs):
     """Generate code for SEND_WRITE_REQUEST intrinsic."""
-    idx = node.args[0]
-    we = node.args[1]
-    idx_val = dump_rval_ref(module_ctx, sys, idx)
+    _, we, addr, _ = node.args
+    addr_val = dump_rval_ref(module_ctx, sys, addr)
     we_val = dump_rval_ref(module_ctx, sys, we)
-    val = dump_rval_ref(module_ctx, sys, node)
-    return f"""
-                    let {val} = unsafe {{
-                        if {we_val} {{
+    return f"""{{
+                    if {we_val} {{
+                        unsafe {{
                             let mem_interface = &sim.mem_interface;
                             let success = mem_interface.send_request(
-                                {idx_val} as i64,
+                                {addr_val} as i64,
                                 true,
-                                rust_callback,
+                                crate::modules::rust_callback,
                                 sim as *const _ as *mut _,
                             );
                             success
-                        }} else {{
-                            false
                         }}
-                    }};
-                """
+                    }} else {{
+                        false
+                    }}
+                }}"""
 
 
 def _codegen_use_dram(node, module_ctx, sys, **_kwargs):
@@ -136,21 +140,20 @@ def _codegen_use_dram(node, module_ctx, sys, **_kwargs):
 def _codegen_has_mem_resp(node, module_ctx, sys, **_kwargs):
     """Generate code for HAS_MEM_RESP intrinsic."""
     metadata = get_current_callback_metadata()
-    val = dump_rval_ref(module_ctx, sys, node)
     mem_rdata = metadata.mem_user_rdata
     if not mem_rdata:
-        return f"let {val} = false"
-    return f"let {val} = sim.{mem_rdata}.payload.is_empty() == false"
+        return "false"
+    return f"sim.{mem_rdata}.payload.is_empty() == false"
 
 
 def _codegen_mem_resp(node, module_ctx, sys, **_kwargs):
     """Generate code for MEM_RESP intrinsic."""
     metadata = get_current_callback_metadata()
-    val = dump_rval_ref(module_ctx, sys, node)
     mem_rdata = metadata.mem_user_rdata
     if not mem_rdata:
-        return f"let {val} = 0"
-    return f"let {val} = sim.{mem_rdata}.payload.front().unwrap().clone()"
+        rust_ty = dtype_to_rust_type(node.dtype)
+        return f"ValueCastTo::<{rust_ty}>::cast(&0)"
+    return f"sim.{mem_rdata}.payload.front().unwrap().clone()"
 
 
 def _codegen_mem_write(node, module_ctx, sys, **kwargs):
@@ -198,6 +201,7 @@ _INTRINSIC_DISPATCH = {
     Intrinsic.USE_DRAM: _codegen_use_dram,
     Intrinsic.HAS_MEM_RESP: _codegen_has_mem_resp,
     Intrinsic.MEM_RESP: _codegen_mem_resp,
+    Intrinsic.GET_MEM_RESP: _codegen_mem_resp,
     Intrinsic.MEM_WRITE: _codegen_mem_write,
 }
 
