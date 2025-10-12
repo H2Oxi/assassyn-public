@@ -53,54 +53,75 @@ class Expr(Value):
     def __init__(self, opcode, operands: list):
         '''Initialize the expression with an opcode'''
         #pylint: disable=import-outside-toplevel,too-many-locals
+        self.opcode = opcode
+        self.loc = self.parent = None
+        # NOTE: We only wrap values in Operand, not Ports or Arrays
+        self._operands = []
+        for operand in operands:
+            self._operands.append(self._prepare_operand(operand))
+        self.users = []
+
+    def _prepare_operand(self, operand):
+        '''Normalize an incoming operand and register its usage'''
+        #pylint: disable=import-outside-toplevel
         from ..array import Array
         from ..const import Const
         from ..module import Port, Wire, Module
         from ..dtype import RecordValue
         from ...builder import Singleton
         from ..module.downstream import Downstream
+
+        if isinstance(operand, (Array, Port, Wire)):
+            operand.users.append(self)
+            return operand
+
+        if isinstance(operand, Expr):
+            return self._prepare_expr_operand(operand, Singleton.builder.current_module)
+
+        if isinstance(operand, (Const, str, RecordValue, Module, Downstream)):
+            return Operand(operand, self)
+
+        raise AssertionError(f'{operand} is a {type(operand)}')
+
+    def _prepare_expr_operand(self, expr_operand: Expr, current_module):
+        '''Wrap an expression operand and enforce module ownership rules'''
+        #pylint: disable=import-outside-toplevel
+        from ..module.downstream import Downstream
         from .call import Bind
-        self.opcode = opcode
-        self.loc = self.parent = None
-        # NOTE: We only wrap values in Operand, not Ports or Arrays
-        self._operands = []
-        for i in operands:
-            wrapped = i
-            if isinstance(i, (Array, Port, Wire)):
-                i.users.append(self)
-            elif isinstance(i, Expr):
-                if isinstance(i, Bind):
-                    wrapped = Operand(i, self)
-                    i.users.append(wrapped)
-                else:
-                    current_module = Singleton.builder.current_module
-                    expr_module = i.parent.module if i.parent else None
-                    if not isinstance(current_module, Downstream):
-                        allow_cross_module = False
-                        if isinstance(i, WireRead):
-                            wire_owner = getattr(i.wire, 'module', None)
-                            if wire_owner is None:
-                                wire_owner = getattr(i.wire, 'parent', None)
-                            if wire_owner is not None:
-                                # Import locally to avoid circular dependency at module load time
-                                from ..module.external import ExternalSV  # pylint: disable=import-outside-toplevel
-                                allow_cross_module = isinstance(wire_owner, ExternalSV)
-                        if not allow_cross_module:
-                            assert current_module == expr_module, \
-                                f'Expression {i} is from module {expr_module}, \
-                                but current module is {current_module}'
-                    wrapped = Operand(i, self)
-                    i.users.append(wrapped)
-            elif isinstance(i, (Const, str, RecordValue)):
-                wrapped = Operand(i, self)
-            elif isinstance(i, Module):
-                wrapped = Operand(i, self)
-            elif isinstance(i, Downstream):
-                wrapped = Operand(i, self)
-            else:
-                assert False, f'{i} is a {type(i)}'
-            self._operands.append(wrapped)
-        self.users = []
+
+        if isinstance(expr_operand, Bind):
+            wrapped = Operand(expr_operand, self)
+            expr_operand.users.append(wrapped)
+            return wrapped
+
+        if not isinstance(current_module, Downstream):
+            expr_module = expr_operand.parent.module if expr_operand.parent else None
+            if not self._is_cross_module_allowed(expr_operand):
+                assert current_module == expr_module, (
+                    f'Expression {expr_operand} is from module {expr_module}, '
+                    f'but current module is {current_module}'
+                )
+
+        wrapped = Operand(expr_operand, self)
+        expr_operand.users.append(wrapped)
+        return wrapped
+
+    def _is_cross_module_allowed(self, expr_operand: Expr) -> bool:
+        '''Check whether we allow cross-module usage for the given expression'''
+        if not isinstance(expr_operand, WireRead):
+            return False
+
+        wire_owner = getattr(expr_operand.wire, 'module', None)
+        if wire_owner is None:
+            wire_owner = getattr(expr_operand.wire, 'parent', None)
+        if wire_owner is None:
+            return False
+
+        # Import locally to avoid circular dependency at module load time
+        #pylint: disable=import-outside-toplevel
+        from ..module.external import ExternalSV
+
+        return isinstance(wire_owner, ExternalSV)
 
     def get_operand(self, idx: int):
         '''Get the operand at the given index'''

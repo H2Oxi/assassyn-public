@@ -217,7 +217,70 @@ def generate_top_harness(dumper):
     for entry in dumper.external_wire_assignments:
         external_assignments_by_consumer[entry['consumer']].append(entry)
 
-    for module in instantiation_modules:
+    def _queue_cross_module_assignments(producer_module, assignments):
+        target_lines = module_connection_map.get(producer_module)
+        if target_lines is not None:
+            target_lines.extend(assignments)
+        else:
+            pending_connection_assignments[producer_module].extend(assignments)
+
+    def _declare_cross_module_wire(name, dtype_expr):
+        if name not in declared_cross_module_wires:
+            dumper.append_code(f'{name} = Wire({dtype_expr})')
+            declared_cross_module_wires.add(name)
+
+    def _attach_consumer_external_entries(module, port_map):
+        consumer_external_entries = external_assignments_by_consumer.get(module, [])
+        handled_consumer_ports = set()
+        for assignment in consumer_external_entries:
+            expr = assignment['expr']
+            consumer_port = dumper.get_external_port_name(expr)
+            if consumer_port in handled_consumer_ports:
+                continue
+            handled_consumer_ports.add(consumer_port)
+            dtype = dump_type(expr.dtype)
+            _declare_cross_module_wire(consumer_port, dtype)
+            valid_name = f"{consumer_port}_valid"
+            _declare_cross_module_wire(valid_name, "Bits(1)")
+            port_map.append(f"{consumer_port}={consumer_port}")
+            port_map.append(f"{valid_name}={valid_name}")
+            producer_module = assignment['producer']
+            producer_name = namify(producer_module.name)
+            producer_port = dumper.external_wire_outputs.get(assignment['wire'])
+            if producer_port is None:
+                continue
+            assignments = [
+                f'{consumer_port}.assign(inst_{producer_name}.expose_{producer_port})',
+                f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
+            ]
+            _queue_cross_module_assignments(producer_module, assignments)
+
+    def _attach_external_module_inputs(module, port_map):
+        in_wires = getattr(module, 'in_wires', None)
+        if not in_wires:
+            return
+        for _, source_expr in in_wires.items():
+            if source_expr is None:
+                continue
+            producer_module = getattr(source_expr.parent, 'module', None)
+            if producer_module is None:
+                continue
+            producer_name = namify(producer_module.name)
+            port_name = dumper.get_external_port_name(source_expr)
+            dtype = dump_type(source_expr.dtype)
+            _declare_cross_module_wire(port_name, dtype)
+            valid_name = f"{port_name}_valid"
+            _declare_cross_module_wire(valid_name, "Bits(1)")
+            port_map.append(f"{port_name}={port_name}")
+            port_map.append(f"{valid_name}={valid_name}")
+            exposed_name = dumper.dump_rval(source_expr, True)
+            assignments = [
+                f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
+                f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
+            ]
+            _queue_cross_module_assignments(producer_module, assignments)
+
+    for module in instantiation_modules:  # pylint: disable=too-many-nested-blocks
         mod_name = namify(module.name)
         is_downstream = isinstance(module, Downstream)
         is_sram = isinstance(module, SRAM)
@@ -240,40 +303,7 @@ def generate_top_harness(dumper):
                     )
                 port_map.append(f"{namify(port.name)}_valid={fifo_base_name}_pop_valid")
 
-            consumer_external_entries = external_assignments_by_consumer.get(module, [])
-            handled_consumer_ports = set()
-            for assignment in consumer_external_entries:
-                expr = assignment['expr']
-                consumer_port = dumper.get_external_port_name(expr)
-                if consumer_port in handled_consumer_ports:
-                    continue
-                handled_consumer_ports.add(consumer_port)
-                dtype = dump_type(expr.dtype)
-                if consumer_port not in declared_cross_module_wires:
-                    dumper.append_code(f'{consumer_port} = Wire({dtype})')
-                    declared_cross_module_wires.add(consumer_port)
-                valid_name = f"{consumer_port}_valid"
-                if valid_name not in declared_cross_module_wires:
-                    dumper.append_code(f'{valid_name} = Wire(Bits(1))')
-                    declared_cross_module_wires.add(valid_name)
-
-                port_map.append(f"{consumer_port}={consumer_port}")
-                port_map.append(f"{valid_name}={valid_name}")
-
-                producer_module = assignment['producer']
-                producer_name = namify(producer_module.name)
-                producer_port = dumper.external_wire_outputs.get(assignment['wire'])
-                if producer_port is None:
-                    continue
-                assignments = [
-                    f'{consumer_port}.assign(inst_{producer_name}.expose_{producer_port})',
-                    f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
-                ]
-                target_lines = module_connection_map.get(producer_module)
-                if target_lines is not None:
-                    target_lines.extend(assignments)
-                else:
-                    pending_connection_assignments[producer_module].extend(assignments)
+            _attach_consumer_external_entries(module, port_map)
 
         else:
             if module in dumper.downstream_dependencies:
@@ -281,78 +311,10 @@ def generate_top_harness(dumper):
                     dep_name = namify(dep_mod.name)
                     port_map.append(f"{dep_name}_executed=inst_{dep_name}.executed")
 
-            consumer_external_entries = external_assignments_by_consumer.get(module, [])
-            handled_consumer_ports = set()
-            for assignment in consumer_external_entries:
-                expr = assignment['expr']
-                consumer_port = dumper.get_external_port_name(expr)
-                if consumer_port in handled_consumer_ports:
-                    continue
-                handled_consumer_ports.add(consumer_port)
-                dtype = dump_type(expr.dtype)
-                if consumer_port not in declared_cross_module_wires:
-                    dumper.append_code(f'{consumer_port} = Wire({dtype})')
-                    declared_cross_module_wires.add(consumer_port)
-                valid_name = f"{consumer_port}_valid"
-                if valid_name not in declared_cross_module_wires:
-                    dumper.append_code(f'{valid_name} = Wire(Bits(1))')
-                    declared_cross_module_wires.add(valid_name)
-
-                port_map.append(f"{consumer_port}={consumer_port}")
-                port_map.append(f"{valid_name}={valid_name}")
-
-                producer_module = assignment['producer']
-                producer_name = namify(producer_module.name)
-                producer_port = dumper.external_wire_outputs.get(assignment['wire'])
-                if producer_port is None:
-                    continue
-                assignments = [
-                    f'{consumer_port}.assign(inst_{producer_name}.expose_{producer_port})',
-                    f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
-                ]
-                target_lines = module_connection_map.get(producer_module)
-                if target_lines is not None:
-                    target_lines.extend(assignments)
-                else:
-                    pending_connection_assignments[producer_module].extend(assignments)
+            _attach_consumer_external_entries(module, port_map)
 
             if isinstance(module, ExternalSV):
-                in_wires = getattr(module, 'in_wires', None)
-                if in_wires is not None:
-                    for wire_name in in_wires.keys():
-                        try:
-                            source_expr = in_wires[wire_name]
-                        except KeyError:
-                            continue
-                        if source_expr is None:
-                            continue
-                        producer_module = getattr(source_expr.parent, 'module', None)
-                        if producer_module is None:
-                            continue
-                        producer_name = namify(producer_module.name)
-                        port_name = dumper.get_external_port_name(source_expr)
-                        dtype = dump_type(source_expr.dtype)
-                        if port_name not in declared_cross_module_wires:
-                            dumper.append_code(f'{port_name} = Wire({dtype})')
-                            declared_cross_module_wires.add(port_name)
-                        valid_name = f"{port_name}_valid"
-                        if valid_name not in declared_cross_module_wires:
-                            dumper.append_code(f'{valid_name} = Wire(Bits(1))')
-                            declared_cross_module_wires.add(valid_name)
-
-                        port_map.append(f"{port_name}={port_name}")
-                        port_map.append(f"{valid_name}={valid_name}")
-
-                        exposed_name = dumper.dump_rval(source_expr, True)
-                        assignments = [
-                            f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
-                            f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
-                        ]
-                        target_lines = module_connection_map.get(producer_module)
-                        if target_lines is not None:
-                            target_lines.extend(assignments)
-                        else:
-                            pending_connection_assignments[producer_module].extend(assignments)
+                _attach_external_module_inputs(module, port_map)
             else:
                 for ext_val in module.externals:
                     if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
@@ -378,13 +340,9 @@ def generate_top_harness(dumper):
                     port_name = dumper.get_external_port_name(ext_val)
                     exposed_name = dumper.dump_rval(ext_val, True, producer_ctx_name)
                     dtype = dump_type(ext_val.dtype)
-                    if port_name not in declared_cross_module_wires:
-                        dumper.append_code(f'{port_name} = Wire({dtype})')
-                        declared_cross_module_wires.add(port_name)
+                    _declare_cross_module_wire(port_name, dtype)
                     valid_name = f"{port_name}_valid"
-                    if valid_name not in declared_cross_module_wires:
-                        dumper.append_code(f'{valid_name} = Wire(Bits(1))')
-                        declared_cross_module_wires.add(valid_name)
+                    _declare_cross_module_wire(valid_name, "Bits(1)")
 
                     port_map.append(f"{port_name}={port_name}")
                     port_map.append(f"{valid_name}={valid_name}")
@@ -393,11 +351,7 @@ def generate_top_harness(dumper):
                         f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
                         f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
                     ]
-                    target_lines = module_connection_map.get(producer_module)
-                    if target_lines is not None:
-                        target_lines.extend(assignments)
-                    else:
-                        pending_connection_assignments[producer_module].extend(assignments)
+                    _queue_cross_module_assignments(producer_module, assignments)
             if is_sram:
                 sram_info = get_sram_info(module)
                 array = sram_info['array']

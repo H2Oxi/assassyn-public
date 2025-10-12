@@ -320,7 +320,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     ).as_posix()
     fd.write(
         '  let config_path = std::env::var("ASSASSYN_HOME")\n'
-        '    .map(|home| format!("{}/tools/c-ramulator2-wrapper/configs/example_config.yaml", home))\n'
+        '    .map(|home| format!("{}/tools/c-ramulator2-wrapper/configs/'
+        'example_config.yaml", home))\n'
         f'    .unwrap_or_else(|_| String::from("{default_config_path}"));\n'
     )
     fd.write(

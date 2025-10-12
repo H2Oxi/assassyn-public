@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,too-few-public-methods
 
-import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -269,7 +268,7 @@ class DirectionalWires:
         ]
 
 
-class ExternalSV(Downstream):
+class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
     '''An external block implemented in SystemVerilog.'''
 
     __external_config__: _ExternalConfig | None = None
