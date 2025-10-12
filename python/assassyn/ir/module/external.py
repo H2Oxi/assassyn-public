@@ -269,7 +269,9 @@ class DirectionalWires:
 
     def items(self):
         """Iterate over (name, value) pairs for the selected direction."""
-        for name in self.keys():
+        for name, wire in self._module.wires.items():
+            if wire.direction != self._direction:
+                continue
             yield name, self[name]
 
     def values(self):
