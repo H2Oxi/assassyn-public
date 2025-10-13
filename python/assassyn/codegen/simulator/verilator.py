@@ -138,6 +138,223 @@ def _run_subprocess(cmd: List[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=cwd, env=os.environ.copy())
 
 
+def _ensure_sv_source(crate: ExternalFFIModule) -> Path:
+    """Return the absolute path to the SystemVerilog source and ensure it exists."""
+    sv_source = crate.crate_path / crate.sv_rel_path
+    if not sv_source.exists():
+        raise FileNotFoundError(f"SystemVerilog source not found: {sv_source}")
+    return sv_source
+
+
+def _prepare_build_directory(crate: ExternalFFIModule) -> Path:
+    """Reset and create the Verilator build directory."""
+    build_root = crate.crate_path / "build"
+    obj_dir = build_root / "verilated"
+    shutil.rmtree(build_root, ignore_errors=True)
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    return obj_dir
+
+
+def _run_verilator_compile(crate: ExternalFFIModule, sv_source: Path, obj_dir: Path) -> None:
+    """Invoke Verilator to generate the C++ model."""
+    verilator_exe = os.environ.get("ASSASSYN_VERILATOR", "verilator")
+    verilator_cmd = [
+        verilator_exe,
+        "--cc",
+        str(sv_source),
+        "--top-module",
+        crate.top_module,
+        "-O3",
+        "--Mdir",
+        str(obj_dir),
+    ]
+    _run_subprocess(verilator_cmd)
+
+
+def _resolve_verilator_paths() -> tuple[Path, Path]:
+    """Locate the Verilator include directories."""
+    verilator_root = os.environ.get("VERILATOR_ROOT")
+    if not verilator_root:
+        raise EnvironmentError(
+            "VERILATOR_ROOT is not set. Please run 'source setup.sh' before "
+            "generating external FFIs."
+        )
+    include_dir = Path(verilator_root) / "include"
+    if not include_dir.exists():
+        raise FileNotFoundError(f"Verilator include directory not found: {include_dir}")
+    return include_dir, include_dir / "vltstd"
+
+
+def _gather_source_files(
+    crate: ExternalFFIModule,
+    obj_dir: Path,
+    include_dir: Path,
+) -> List[Path]:
+    """Collect all C++ sources required to build the shared library."""
+    cpp_class = f"V{crate.top_module}"
+    aggregated = obj_dir / f"{cpp_class}__ALL.cpp"
+
+    source_files: List[Path] = []
+    if aggregated.exists():
+        source_files.append(aggregated)
+    else:
+        for path in sorted(obj_dir.glob("*.cpp")):
+            if path.name.endswith("__ALL.cpp"):
+                continue
+            source_files.append(path)
+
+    wrapper_src = crate.crate_path / "src" / "wrapper.cpp"
+    if not wrapper_src.exists():
+        raise FileNotFoundError(f"Wrapper source not found: {wrapper_src}")
+    source_files.append(wrapper_src)
+
+    runtime_sources = [include_dir / "verilated.cpp"]
+    for extra in ("verilated_threads.cpp", "verilated_dpi.cpp"):
+        extra_path = include_dir / extra
+        if extra_path.exists():
+            runtime_sources.append(extra_path)
+    source_files.extend(runtime_sources)
+    return source_files
+
+
+def _build_compile_command(
+    crate: ExternalFFIModule,
+    source_files: List[Path],
+    include_dir: Path,
+    vltstd_dir: Path,
+    obj_dir: Path,
+) -> tuple[List[str], str, Path]:
+    """Construct the compiler command for the shared library."""
+    compiler = _compiler_command()
+    compile_cmd = compiler + [
+        "-std=c++17",
+        "-shared",
+        "-fPIC",
+        "-O3",
+    ]
+    for include in (include_dir, vltstd_dir, obj_dir):
+        compile_cmd.extend(["-I", str(include)])
+    compile_cmd.extend(str(src) for src in source_files)
+
+    lib_filename = f"lib{crate.dynamic_lib_name}{_dynamic_lib_suffix()}"
+    lib_path = crate.crate_path / lib_filename
+    compile_cmd.extend(["-o", str(lib_path)])
+    return compile_cmd, lib_filename, lib_path
+
+
+def _unique_name(base: str, registry: Dict[str, int]) -> str:
+    """Return a unique name derived from base and update the registry."""
+    count = registry.get(base, 0)
+    registry[base] = count + 1
+    return base if count == 0 else f"{base}_{count + 1}"
+
+
+def _sanitize_base_name(top_module: str, fallback: str) -> str:
+    """Normalize the base name used for crate generation."""
+    base = namify(top_module) or namify(fallback)
+    if not base:
+        base = "external"
+    if base[0].isdigit():
+        base = f"ext_{base}"
+    return base
+
+
+def _collect_ports(module: ExternalSV) -> tuple[List[FFIPort], List[FFIPort]]:
+    """Split module wires into input and output ports for FFI generation."""
+    ports_in: List[FFIPort] = []
+    ports_out: List[FFIPort] = []
+    for name, wire in module.wires.items():
+        port = _dtype_to_port(name, wire)
+        if port.direction == "output":
+            ports_out.append(port)
+        else:
+            ports_in.append(port)
+    return ports_in, ports_out
+
+
+def _create_external_spec(
+    module: ExternalSV,
+    verilator_root: Path,
+    used_crate_names: Dict[str, int],
+    used_dynlib_names: Dict[str, int],
+) -> ExternalFFIModule:
+    """Create an ExternalFFIModule description and prepare the crate directory."""
+    top_module = module.external_module_name
+    if not top_module:
+        raise ValueError("ExternalSV module must specify 'module_name' to drive Verilator")
+
+    base_name = _sanitize_base_name(top_module, module.name)
+    crate_name = _unique_name(f"verilated_{base_name}", used_crate_names)
+    symbol_prefix = namify(crate_name)
+    dynlib_base = f"{symbol_prefix}_ffi"
+    dynamic_lib_name = namify(_unique_name(dynlib_base, used_dynlib_names))
+
+    crate_path = verilator_root / crate_name
+    crate_path.mkdir(parents=True, exist_ok=True)
+    (crate_path / "src").mkdir(exist_ok=True)
+    (crate_path / "rtl").mkdir(exist_ok=True)
+
+    src_sv_path = _ensure_repo_local_path(module.file_path)
+    if not src_sv_path.exists():
+        raise FileNotFoundError(f"ExternalSV file not found: {src_sv_path}")
+    dst_sv_path = crate_path / "rtl" / src_sv_path.name
+    shutil.copy(src_sv_path, dst_sv_path)
+
+    ports_in, ports_out = _collect_ports(module)
+
+    return ExternalFFIModule(
+        crate_name=crate_name,
+        crate_path=crate_path,
+        symbol_prefix=symbol_prefix,
+        dynamic_lib_name=dynamic_lib_name,
+        top_module=top_module,
+        sv_filename=src_sv_path.name,
+        sv_rel_path=os.path.join("rtl", src_sv_path.name),
+        inputs=ports_in,
+        outputs=ports_out,
+        has_clock=getattr(module, "has_clock", False),
+        has_reset=getattr(module, "has_reset", False),
+        original_module_name=module.name,
+    )
+
+
+def _spec_manifest_entry(spec: ExternalFFIModule, simulator_root: Path) -> Dict[str, object]:
+    """Return a manifest entry describing a compiled ExternalFFIModule."""
+    return {
+        "crate": spec.crate_name,
+        "dynamic_lib": spec.dynamic_lib_name,
+        "top_module": spec.top_module,
+        "sv": spec.sv_filename,
+        "crate_dir": os.path.relpath(spec.crate_path, simulator_root),
+        "struct_name": spec.struct_name,
+        "has_clock": spec.has_clock,
+        "has_reset": spec.has_reset,
+        "lib_filename": spec.lib_filename,
+        "lib_path": str(spec.lib_path) if spec.lib_path else "",
+        "inputs": [
+            {
+                "name": port.name,
+                "bits": port.bits,
+                "signed": port.signed,
+                "rust_type": port.rust_type,
+                "c_type": port.c_type,
+            }
+            for port in spec.inputs
+        ],
+        "outputs": [
+            {
+                "name": port.name,
+                "bits": port.bits,
+                "signed": port.signed,
+                "rust_type": port.rust_type,
+                "c_type": port.c_type,
+            }
+            for port in spec.outputs
+        ],
+        "original_module_name": spec.original_module_name,
+    }
+
+
 def _generate_cargo_toml(crate: ExternalFFIModule) -> str:
     return f"""[package]
 name = "{crate.crate_name}"
@@ -165,7 +382,10 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:  # pylint: disable=too-ma
         "#[allow(non_camel_case_types)]",
         "pub struct ModuleHandle { _private: [u8; 0] }",
         "",
-        "const LIB_PATH: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/.verilator-lib-path\"));",
+        (
+            "const LIB_PATH: &str = include_str!(concat!("
+            "env!(\"CARGO_MANIFEST_DIR\"), \"/.verilator-lib-path\"));"
+        ),
         "",
         "fn lib_path() -> PathBuf {",
         "    PathBuf::from(LIB_PATH.trim())",
@@ -405,7 +625,7 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
         "",
         "extern \"C\" {",
         "",
-        "using ModuleHandle = {cpp_class};".format(cpp_class=cpp_class),
+        f"using ModuleHandle = {cpp_class};",
         "",
         f"ModuleHandle* {prefix}_new() {{",
         "    static bool inited = false;",
@@ -456,88 +676,24 @@ def _generate_wrapper_cpp(crate: ExternalFFIModule) -> str:
 def _build_verilator_library(crate: ExternalFFIModule) -> Path:
     """Compile the Verilator-generated model and wrapper into a shared library."""
 
-    crate_path = crate.crate_path
-    sv_source = crate_path / crate.sv_rel_path
-    if not sv_source.exists():
-        raise FileNotFoundError(f"SystemVerilog source not found: {sv_source}")
-
-    build_root = crate_path / "build"
-    obj_dir = build_root / "verilated"
-    shutil.rmtree(build_root, ignore_errors=True)
-    obj_dir.mkdir(parents=True, exist_ok=True)
-
-    verilator_exe = os.environ.get("ASSASSYN_VERILATOR", "verilator")
-    verilator_cmd = [
-        verilator_exe,
-        "--cc",
-        str(sv_source),
-        "--top-module",
-        crate.top_module,
-        "-O3",
-        "--Mdir",
-        str(obj_dir),
-    ]
-    _run_subprocess(verilator_cmd)
-
-    verilator_root = os.environ.get("VERILATOR_ROOT")
-    if not verilator_root:
-        raise EnvironmentError(
-            "VERILATOR_ROOT is not set. Please run 'source setup.sh' before generating external FFIs."
-        )
-    include_dir = Path(verilator_root) / "include"
-    vltstd_dir = include_dir / "vltstd"
-    if not include_dir.exists():
-        raise FileNotFoundError(f"Verilator include directory not found: {include_dir}")
-
-    cpp_class = f"V{crate.top_module}"
-    aggregated = (obj_dir / f"{cpp_class}__ALL.cpp")
-
-    source_files: List[Path] = []
-    if aggregated.exists():
-        source_files.append(aggregated)
-    else:
-        for path in sorted(obj_dir.glob("*.cpp")):
-            if path.name.endswith("__ALL.cpp"):
-                continue
-            source_files.append(path)
-
-    wrapper_src = crate_path / "src" / "wrapper.cpp"
-    if not wrapper_src.exists():
-        raise FileNotFoundError(f"Wrapper source not found: {wrapper_src}")
-    source_files.append(wrapper_src)
-
-    runtime_sources = [include_dir / "verilated.cpp"]
-    threads_src = include_dir / "verilated_threads.cpp"
-    if threads_src.exists():
-        runtime_sources.append(threads_src)
-    dpi_src = include_dir / "verilated_dpi.cpp"
-    if dpi_src.exists():
-        runtime_sources.append(dpi_src)
-    source_files.extend(runtime_sources)
-
-    compiler = _compiler_command()
-    compile_cmd = compiler + [
-        "-std=c++17",
-        "-shared",
-        "-fPIC",
-        "-O3",
-    ]
-    for include in (include_dir, vltstd_dir, obj_dir):
-        compile_cmd.extend(["-I", str(include)])
-    compile_cmd.extend(str(src) for src in source_files)
-
-    lib_filename = f"lib{crate.dynamic_lib_name}{_dynamic_lib_suffix()}"
-    lib_path = crate.crate_path / lib_filename
-    compile_cmd.extend(["-o", str(lib_path)])
-
+    sv_source = _ensure_sv_source(crate)
+    obj_dir = _prepare_build_directory(crate)
+    _run_verilator_compile(crate, sv_source, obj_dir)
+    include_dir, vltstd_dir = _resolve_verilator_paths()
+    source_files = _gather_source_files(crate, obj_dir, include_dir)
+    compile_cmd, lib_filename, lib_path = _build_compile_command(
+        crate,
+        source_files,
+        include_dir,
+        vltstd_dir,
+        obj_dir,
+    )
     _run_subprocess(compile_cmd)
 
     crate.lib_filename = lib_filename
     crate.lib_path = lib_path
 
-    with open(crate.crate_path / ".verilator-lib-path", "w", encoding="utf-8") as fd:
-        fd.write(str(lib_path.resolve()))
-
+    _write_file(crate.crate_path / ".verilator-lib-path", str(lib_path.resolve()))
     return lib_path
 
 
@@ -559,116 +715,21 @@ def generate_external_sv_crates(
         if not getattr(module, "file_path", None):
             continue
 
-        top_module = module.external_module_name
-        if not top_module:
-            raise ValueError("ExternalSV module must specify 'module_name' to drive Verilator")
-
-        base_name = namify(top_module) or namify(module.name)
-        if not base_name:
-            base_name = "external"
-        if base_name[0].isdigit():
-            base_name = f"ext_{base_name}"
-
-        crate_name = f"verilated_{base_name}"
-        count = used_crate_names.get(crate_name, 0)
-        if count:
-            crate_name = f"{crate_name}_{count + 1}"
-        used_crate_names[crate_name] = count + 1
-
-        symbol_prefix = crate_name
-        dynlib_base = f"{symbol_prefix}_ffi"
-        dyn_count = used_dynlib_names.get(dynlib_base, 0)
-        dynamic_lib_name = dynlib_base if dyn_count == 0 else f"{dynlib_base}_{dyn_count + 1}"
-        used_dynlib_names[dynlib_base] = dyn_count + 1
-
-        crate_path = verilator_root / crate_name
-        crate_path.mkdir(parents=True, exist_ok=True)
-        (crate_path / "src").mkdir(exist_ok=True)
-        (crate_path / "rtl").mkdir(exist_ok=True)
-
-        src_sv_path = _ensure_repo_local_path(module.file_path)
-        if not src_sv_path.exists():
-            raise FileNotFoundError(f"ExternalSV file not found: {src_sv_path}")
-        dst_sv_path = crate_path / "rtl" / src_sv_path.name
-        shutil.copy(src_sv_path, dst_sv_path)
-
-        ports_in: List[FFIPort] = []
-        ports_out: List[FFIPort] = []
-        for name, wire in module.wires.items():
-            port = _dtype_to_port(name, wire)
-            if port.direction == "output":
-                ports_out.append(port)
-            else:
-                ports_in.append(port)
-
-        spec = ExternalFFIModule(
-            crate_name=crate_name,
-            crate_path=crate_path,
-            symbol_prefix=namify(symbol_prefix),
-            dynamic_lib_name=namify(dynamic_lib_name),
-            top_module=top_module,
-            sv_filename=src_sv_path.name,
-            sv_rel_path=os.path.join("rtl", src_sv_path.name),
-            inputs=ports_in,
-            outputs=ports_out,
-            has_clock=getattr(module, "has_clock", False),
-            has_reset=getattr(module, "has_reset", False),
-            original_module_name=module.name,
-        )
-
+        spec = _create_external_spec(module, verilator_root, used_crate_names, used_dynlib_names)
         cargo_toml = _generate_cargo_toml(spec)
         lib_rs = _generate_lib_rs(spec)
         wrapper_cpp = _generate_wrapper_cpp(spec)
 
-        _write_file(crate_path / "Cargo.toml", cargo_toml)
-        _write_file(crate_path / "src/lib.rs", lib_rs)
-        _write_file(crate_path / "src/wrapper.cpp", wrapper_cpp)
+        _write_file(spec.crate_path / "Cargo.toml", cargo_toml)
+        _write_file(spec.crate_path / "src/lib.rs", lib_rs)
+        _write_file(spec.crate_path / "src/wrapper.cpp", wrapper_cpp)
 
         _build_verilator_library(spec)
         specs.append(spec)
 
-    manifest = {
-        "modules": [
-            {
-                "crate": spec.crate_name,
-                "dynamic_lib": spec.dynamic_lib_name,
-                "top_module": spec.top_module,
-                "sv": spec.sv_filename,
-                "crate_dir": os.path.relpath(spec.crate_path, simulator_root),
-                "struct_name": spec.struct_name,
-                "has_clock": spec.has_clock,
-                "has_reset": spec.has_reset,
-                "lib_filename": spec.lib_filename,
-                "lib_path": str(spec.lib_path) if spec.lib_path else "",
-                "inputs": [
-                    {
-                        "name": port.name,
-                        "bits": port.bits,
-                        "signed": port.signed,
-                        "rust_type": port.rust_type,
-                        "c_type": port.c_type,
-                    }
-                    for port in spec.inputs
-                ],
-                "outputs": [
-                    {
-                        "name": port.name,
-                        "bits": port.bits,
-                        "signed": port.signed,
-                        "rust_type": port.rust_type,
-                        "c_type": port.c_type,
-                    }
-                    for port in spec.outputs
-                ],
-                "original_module_name": spec.original_module_name,
-            }
-            for spec in specs
-        ]
-    }
-
     if specs:
-        manifest_path = simulator_root / "external_modules.json"
-        _write_file(manifest_path, json.dumps(manifest, indent=2))
+        manifest = {"modules": [_spec_manifest_entry(spec, simulator_root) for spec in specs]}
+        _write_file(simulator_root / "external_modules.json", json.dumps(manifest, indent=2))
 
     return specs
 

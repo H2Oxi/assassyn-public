@@ -18,20 +18,35 @@ if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
 
 
+def _write_manifest(simulator_path: Path, sys_name: str, ffi_specs) -> Path:
+    """Write the Cargo manifest for the generated simulator crate."""
+    manifest_path = simulator_path / "Cargo.toml"
+    runtime_path = Path(repo_path()) / "tools" / "rust-sim-runtime"
+    with open(manifest_path, 'w', encoding="utf-8") as cargo:
+        cargo.write("[package]\n")
+        cargo.write(f'name = "{sys_name}_simulator"\n')
+        cargo.write('version = "0.1.0"\n')
+        cargo.write('edition = "2021"\n')
+        cargo.write('[dependencies]\n')
+        cargo.write(f'sim-runtime = {{ path = "{runtime_path}" }}\n')
+        for spec in ffi_specs:
+            rel_path = os.path.relpath(spec.crate_path, simulator_path).replace(os.sep, '/')
+            cargo.write(f'{spec.crate_name} = {{ path = "{rel_path}" }}\n')
+    return manifest_path
+
+
 def elaborate_impl(sys, config):
     """Internal implementation of the elaborate function.
 
     This matches the Rust function in src/backend/simulator/elaborate.rs
     """
-    workspace = Path(config.get('path', os.getcwd()))
     simulator_dirname = (
         config.get('simulator_dirname')
         or config.get('dirname')
         or f"{sys.name}_simulator"
     )
-    simulator_path = workspace / simulator_dirname
-    verilator_dirname = config.get('verilator_dirname', f"{sys.name}_verilator")
-    verilator_root = simulator_path / verilator_dirname
+    simulator_path = Path(config.get('path', os.getcwd())) / simulator_dirname
+    verilator_root = simulator_path / config.get('verilator_dirname', f"{sys.name}_verilator")
 
     if simulator_path.exists() and config.get('override_dump', True):
         shutil.rmtree(simulator_path)
@@ -43,29 +58,19 @@ def elaborate_impl(sys, config):
 
     print(f"Writing simulator code to rust project: {simulator_path}")
 
-    manifest_path = simulator_path / "Cargo.toml"
-    runtime_path = Path(repo_path()) / "tools" / "rust-sim-runtime"
-    with open(manifest_path, 'w', encoding="utf-8") as cargo:
-        cargo.write("[package]\n")
-        cargo.write(f'name = "{sys.name}_simulator"\n')
-        cargo.write('version = "0.1.0"\n')
-        cargo.write('edition = "2021"\n')
-        cargo.write('[dependencies]\n')
-        cargo.write(f'sim-runtime = {{ path = "{runtime_path}" }}\n')
-        for spec in ffi_specs:
-            rel_path = os.path.relpath(spec.crate_path, simulator_path).replace(os.sep, '/')
-            cargo.write(f'{spec.crate_name} = {{ path = "{rel_path}" }}\n')
+    manifest_path = _write_manifest(simulator_path, sys.name, ffi_specs)
 
     shutil.copy(Path(repo_path()) / "rustfmt.toml", simulator_path / "rustfmt.toml")
 
-    modules_dir = simulator_path / "src" / "modules"
-    dump_modules(sys, modules_dir)
+    dump_modules(sys, simulator_path / "src" / "modules")
 
     with open(simulator_path / "src/simulator.rs", 'w', encoding='utf-8') as fd:
         dump_simulator(sys, config, fd)
 
-    template_main = Path(__file__).resolve().parent / "template" / "main.rs"
-    shutil.copy(template_main, simulator_path / "src/main.rs")
+    shutil.copy(
+        Path(__file__).resolve().parent / "template" / "main.rs",
+        simulator_path / "src/main.rs"
+    )
 
     return manifest_path
 

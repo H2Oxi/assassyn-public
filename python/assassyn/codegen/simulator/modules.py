@@ -190,7 +190,9 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
                     for ext_module, wire in assignments:
                         handle_field = external_handle_field(ext_module.name)
                         setter_suffix = namify(wire.name)
-                        port_spec = self._lookup_external_port(ext_module.name, wire.name, "input")
+                        port_spec = lookup_external_port(
+                            self.external_specs, ext_module.name, wire.name, "input"
+                        )
                         rust_ty = (
                             port_spec.rust_type
                             if port_spec is not None
