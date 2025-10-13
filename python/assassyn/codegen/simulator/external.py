@@ -160,6 +160,7 @@ def gather_expr_validities(sys) -> Tuple[Set[Expr], Dict[Module, Set[Expr]]]:
 
 
 def has_module_body(module: Module) -> bool:
+    """Return True when the module has an elaborated body."""
     body = getattr(module, "body", None)
     return body is not None and bool(getattr(body, "body", []))
 

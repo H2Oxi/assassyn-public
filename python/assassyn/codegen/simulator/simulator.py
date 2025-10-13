@@ -7,7 +7,7 @@ from ...analysis import topo_downstream_modules, get_upstreams
 from .utils import dtype_to_rust_type, int_imm_dumper_impl, fifo_name
 from ...builder import SysBuilder
 from ...ir.block import CycledBlock
-from ...ir.expr import Expr, Bind
+from ...ir.expr import Bind
 from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM

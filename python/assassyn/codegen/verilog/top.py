@@ -24,7 +24,6 @@ from ...ir.expr import (
 from ...ir.dtype import Record
 from ...utils import namify, unwrap_operand
 from ...ir.const import Const
-from ...analysis import topo_downstream_modules
 
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 def generate_top_harness(dumper):
