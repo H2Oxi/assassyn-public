@@ -18,9 +18,11 @@ if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
 
 
-def _resolve_paths(sys: "SysBuilder", config: dict[str, typing.Any]) -> tuple[Path, Path]:
-    """Return simulator and Verilator output directories."""
+def elaborate_impl(sys, config):
+    """Internal implementation of the elaborate function.
 
+    This matches the Rust function in src/backend/simulator/elaborate.rs
+    """
     workspace = Path(config.get('path', os.getcwd()))
     simulator_dirname = (
         config.get('simulator_dirname')
@@ -30,26 +32,20 @@ def _resolve_paths(sys: "SysBuilder", config: dict[str, typing.Any]) -> tuple[Pa
     simulator_path = workspace / simulator_dirname
     verilator_dirname = config.get('verilator_dirname', f"{sys.name}_verilator")
     verilator_root = simulator_path / verilator_dirname
-    return simulator_path, verilator_root
 
-
-def _prepare_simulator_dir(simulator_path: Path, override_dump: bool) -> None:
-    """Reset simulator output directory and create required structure."""
-
-    if simulator_path.exists() and override_dump:
+    if simulator_path.exists() and config.get('override_dump', True):
         shutil.rmtree(simulator_path)
 
     simulator_path.mkdir(parents=True, exist_ok=True)
     (simulator_path / "src").mkdir(exist_ok=True)
 
+    ffi_specs = emit_external_sv_ffis(sys, config, simulator_path, verilator_root)
 
-def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs: list[typing.Any]) -> Path:
-    """Emit Cargo.toml for the generated simulator project."""
+    print(f"Writing simulator code to rust project: {simulator_path}")
 
     manifest_path = simulator_path / "Cargo.toml"
     runtime_path = Path(repo_path()) / "tools" / "rust-sim-runtime"
-
-    with open(manifest_path, 'w', encoding='utf-8') as cargo:
+    with open(manifest_path, 'w', encoding="utf-8") as cargo:
         cargo.write("[package]\n")
         cargo.write(f'name = "{sys.name}_simulator"\n')
         cargo.write('version = "0.1.0"\n')
@@ -60,25 +56,7 @@ def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs: list[typ
             rel_path = os.path.relpath(spec.crate_path, simulator_path).replace(os.sep, '/')
             cargo.write(f'{spec.crate_name} = {{ path = "{rel_path}" }}\n')
 
-    return manifest_path
-
-
-def elaborate_impl(sys: "SysBuilder", config: dict[str, typing.Any]):
-    """Internal implementation of the elaborate function."""
-
-    simulator_path, verilator_root = _resolve_paths(sys, config)
-
-    _prepare_simulator_dir(simulator_path, config.get('override_dump', True))
-
-    ffi_specs = emit_external_sv_ffis(sys, config, simulator_path, verilator_root)
-
-    print(f"Writing simulator code to rust project: {simulator_path}")
-
-    manifest_path = _write_manifest(sys, simulator_path, ffi_specs)
-
-    rustfmt_src = Path(repo_path()) / "rustfmt.toml"
-    if rustfmt_src.exists():
-        shutil.copy(rustfmt_src, simulator_path / "rustfmt.toml")
+    shutil.copy(Path(repo_path()) / "rustfmt.toml", simulator_path / "rustfmt.toml")
 
     modules_dir = simulator_path / "src" / "modules"
     dump_modules(sys, modules_dir)
@@ -92,26 +70,21 @@ def elaborate_impl(sys: "SysBuilder", config: dict[str, typing.Any]):
     return manifest_path
 
 
-def elaborate(sys: "SysBuilder", **config):
+def elaborate(sys, **config):
     """Generate a Rust-based simulator for the given Assassyn system."""
 
     # pylint: disable=import-outside-toplevel
     from .port_mapper import reset_port_manager
-
     reset_port_manager()
 
-    local_config = config.copy()
-    local_config.setdefault('simulator_dirname', f"{sys.name}_simulator")
-    local_config.setdefault('verilator_dirname', f"{sys.name}_verilator")
-
-    manifest_path = elaborate_impl(sys, local_config)
+    manifest_path = elaborate_impl(sys, config)
 
     try:
         subprocess.run(
             ["cargo", "fmt", "--manifest-path", str(manifest_path)],
             check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Warning: Failed to format code with cargo fmt")
