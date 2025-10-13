@@ -1,164 +1,77 @@
-# External SystemVerilog Module Integration
+# External SystemVerilog Modules
 
-## Summary
+`external.py` defines the frontend surface for integrating black-box SystemVerilog blocks into an Assassyn design. It layers a small amount of metadata and wiring helpers on top of `Downstream` so external IP behaves like a native module during IR construction, Verilog generation, and simulation.
 
-The `ExternalSV` class enables integration of pre-existing SystemVerilog modules into Assassyn's credit-based pipeline architecture. This module provides a bridge between Assassyn's high-level IR and external SystemVerilog implementations, supporting both simulation and Verilog generation backends as described in the [pipeline design](../../../docs/design/internal/pipeline.md).
+-----
 
 ## Exposed Interfaces
 
-### ExternalSV Class
-
 ```python
-class ExternalSV(Module):
-    def __init__(self, file_path, in_wires=None, out_wires=None, module_name=None, 
-                 no_arbiter=False, has_clock=False, has_reset=False, **wire_connections): ...
-    @property
-    def wires(self): ...
-    def __setitem__(self, key, value): ...
-    def __getitem__(self, key): ...
-    def in_assign(self, **kwargs): ...
-    def __repr__(self): ...
+class ExternalSV(Downstream): ...
+
+class WireIn(Generic[DType]): ...
+class WireOut(Generic[DType]): ...
+class RegOut(Generic[DType]): ...
+
+@external
+class MyIP(ExternalSV):
+    a: WireIn[UInt(32)]
+    b: WireIn[UInt(32)]
+    y: WireOut[UInt(32)]
+    __source__ = "rtl/my_ip.sv"
+    __module_name__ = "my_ip"
+
+ip = MyIP()
+ip.in_assign(a=value_a, b=value_b)
+result = ip.y  # or ip.y[0] for RegOut
 ```
 
-### DirectionalWires Class
+-----
 
-```python
-class DirectionalWires:
-    def __init__(self, ext_module, direction): ...
-    def __contains__(self, key): ...
-    def __iter__(self): ...
-    def __getitem__(self, key): ...
-    def __setitem__(self, key, value): ...
-    def keys(self): ...
-```
+## Descriptor Helpers
 
-## Internal Helpers
+  * `WireIn[...]`, `WireOut[...]`, `RegOut[...]` are lightweight descriptors (`_WireAnnotation`) used in class annotations. They capture the port direction, element type (`DType`), and whether the signal is treated as a wire or a registered output.
+  * `Input`/`Output` remain as deprecated aliases for backward compatibility.
+  * During decoration each descriptor is normalized into `_ExternalWireDecl`, ensuring consumers downstream always observe typed `Wire` objects with consistent `kind` (`wire` or `reg`).
 
-### ExternalSV Class
+-----
 
-The `ExternalSV` class extends the base `Module` class to integrate external SystemVerilog modules into Assassyn's IR.
+## @external Decorator
 
-- **Constructor surface**: Alongside the usual `file_path`, `module_name`, and optional `has_clock`/`has_reset` switches, callers can still spell out the boundary via explicit `in_wires`/`out_wires` dictionaries. In day-to-day code, the preferred path is to decorate subclasses with `@external` and declare ports through annotations: `WireIn[...]` for inputs, `WireOut[...]` for direct combinational outputs, and `RegOut[...]` for registered outputs that are consumed like read-only `RegArray` handles.
+  * The decorator validates that the class extends `ExternalSV`, walks `__annotations__`, and gathers all `WireIn`/`WireOut`/`RegOut` definitions into `_ExternalConfig`.
+  * Configuration fields such as `__source__`, `__module_name__`, `__has_clock__`, `__has_reset__`, and `__no_arbiter__` are captured so users can override them either on the subclass or at instantiation time.
+  * Getter/setter properties are installed lazily for each annotated attribute, enabling attribute-style access (`ext.y`) to read or drive wires.
 
-**Member Fields:**
-- `file_path: str` - Path to the SystemVerilog source file
-- `external_module_name: str` - Name of the module in the SystemVerilog file
-- `has_clock: bool` - Whether the external module requires clock signal
-- `has_reset: bool` - Whether the external module requires reset signal
-- `_wires: dict` - Dictionary of declared wires keyed by name
-- `in_wires: DirectionalWires` - Adapter for input wire access
-- `out_wires: DirectionalWires` - Adapter for output wire access
+-----
 
-- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns typed handles. `WireOut` ports immediately create `WireRead` values, while `RegOut` ports return a small proxy that must be indexed (e.g. `external_reg.reg_out[0]`) to record the read. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
+## Directional Wire Views
 
-#### `__init__(self, file_path, in_wires=None, out_wires=None, module_name=None, no_arbiter=False, has_clock=False, has_reset=False, **wire_connections)`
+  * `DirectionalWires` exposes a dict-like API for inputs and outputs (`module.in_wires`, `module.out_wires`).
+  * Reads defer to `_ensure_output_exposed`, which enters a builder context when necessary to create a `wire_read` expression; registered outputs return an `_ExternalRegOutProxy` that enforces index `0`.
+  * Writes dispatch to `wire_assign` and update the underlying `Wire` so that subsequent IR traversal sees the same connection. Assignments can happen through `module.in_wires[...]`, direct attribute access, bracket syntax (`module['a'] = ...`), or the convenience wrapper `in_assign(...)`.
 
-**Explanation:**
-Constructs an external SystemVerilog module integration. The constructor:
+-----
 
-1. **File Path Handling:** Stores the SystemVerilog file path, preserving relative paths for later resolution during elaboration
-2. **Module Identification:** Sets the external module name (defaults to class name if not specified)
-3. **Clock/Reset Configuration:** Records whether the external module requires clock and reset signals
-4. **Wire Registration:** Creates `Wire` objects for declared input and output wires, registering them with the module's port definitions
-5. **Directional Adapters:** Creates `DirectionalWires` adapters for convenient input/output access
-6. **External Marking:** Tags the module with `Module.ATTR_EXTERNAL` for special handling in code generation
-7. **Initial Connections:** Processes keyword arguments as initial wire assignments for declared input wires
+## ExternalSV Class
 
-The method ensures that all declared wires are properly typed and accessible through both the adapter interfaces and direct module access.
+  * **Construction**: resolves decorator supplied defaults, requires a `file_path`, and records `external_module_name`, `has_clock`, `has_reset`, along with module attributes like `Module.ATTR_EXTERNAL`.
+  * **Wire Registration**: instantiates real `Wire` objects for every declared input/output, storing them in `self._wires`. Optional keyword arguments passed to the constructor are validated and queued until a builder context is available (`_apply_pending_connections`).
+  * **IR Integration**: `in_assign()` pushes the builder onto the module body, drives any provided inputs, and returns the declared outputs in order (single object or tuple). Output reads are memoized per wire to keep the generated IR minimal.
+  * **Indexing Helpers**: `__getitem__` and `__setitem__` forward to the directional adapters, letting users treat the module like a small associative array of ports.
+  * **String Dump**: `__repr__` renders the external metadata, attached attributes, and the module body so debug dumps clearly mark external instantiations.
 
-#### `wires` property
+-----
 
-**Explanation:**
-Exposes the internal wire dictionary for use by helper adapters and code generation passes. Returns the `_wires` dictionary keyed by wire name.
+## Registered Outputs
 
-#### `__setitem__(self, key, value)`
+  * `_ExternalRegOutProxy` provides a read-only wrapper that mimics `RegArray` indexing semantics. It only accepts index `0`, returning the associated `wire_read` expression, and exposes the output `dtype` for convenience in type-sensitive code.
 
-**Explanation:**
-Allows assignment to wires using bracket notation. Delegates to the appropriate directional adapter based on wire direction. Raises `KeyError` if the wire is not found.
+-----
 
-#### `__getitem__(self, key)`
+## Typical Usage Patterns
 
-1. **Define the external block**:
-   ```python
-   @external
-   class ExternalAdder(ExternalSV):
-       a: WireIn[UInt(32)]
-       b: WireIn[UInt(32)]
-       c: WireOut[UInt(32)]
+  * **Combinational module**: `python/ci-tests/test_easy_external.py` uses `WireOut` to publish an external adder result directly to downstream logic.
+  * **Pipelined handshake**: `python/ci-tests/test_pipemul.py` declares `RegOut` ports for `out_valid` and the product register while coordinating `async_called` updates.
+  * **Nested instantiation**: `python/ci-tests/test_complex_external.py` constructs multiple `ExternalSV` instances inside a regular `Module`, chaining combinational logic with stateful registers.
 
-       __source__ = "python/ci-tests/resources/adder.sv"
-       __module_name__ = "adder"
-   ```
-   The annotations declare each port, and the decorator resolves `__source__`/`__module_name__` into the configuration that `ExternalSV` consumes.
-
-2. **Drive inputs and read outputs** inside a downstream module:
-   ```python
-   c = ext_adder.in_assign(a=a, b=b)
-   ```
-   `in_assign` records the two input connections via `WireAssign` and returns the single declared `WireOut` (`WireRead`), making the value immediately usable.
-
-**Explanation:**
-Convenience method for assigning values to multiple input wires using keyword arguments. The method:
-1. Assigns each keyword argument to the corresponding input wire
-2. Collects all output wires
-3. Returns the single output if only one exists, or a tuple of all outputs
-
-This method is commonly used for connecting external modules to the rest of the design.
-
-#### `__repr__(self)`
-
-**Explanation:**
-Generates the string representation for IR dumps. The method:
-1. Formats port definitions
-2. Includes module attributes
-3. Adds external file information (file path and module name)
-4. Generates the module declaration with external-specific formatting
-
-The output follows Assassyn's IR format with additional external module metadata.
-
-### DirectionalWires Class
-
-The `DirectionalWires` class provides a convenient adapter for accessing wires based on their direction.
-
-**Purpose:** Simplifies wire access by providing direction-specific interfaces that handle the complexity of wire assignment and reading operations.
-
-**Member Fields:**
-- `_module: ExternalSV` - Reference to the owning external module
-- `_direction: str` - The wire direction this adapter handles ('input' or 'output')
-
-**Methods:**
-
-#### `__init__(self, ext_module, direction)`
-
-**Explanation:**
-Initializes the directional adapter with a reference to the external module and the specific direction it handles.
-
-#### `_get_wire(self, key)`
-
-**Explanation:**
-Internal helper that retrieves a wire by name and validates its direction. Raises `KeyError` if the wire doesn't exist or `ValueError` if the wire's direction doesn't match the adapter's direction.
-
-#### `__contains__(self, key)`
-
-**Explanation:**
-Checks if a wire exists and matches the adapter's direction. Returns `True` if the wire exists and has the correct direction.
-
-#### `__iter__(self)`
-
-**Explanation:**
-Returns an iterator over all wire names that match the adapter's direction.
-
-#### `__getitem__(self, key)`
-
-**Explanation:**
-Retrieves a wire value. For output wires, returns a `WireRead` expression. For input wires, returns the assigned value directly.
-
-#### `__setitem__(self, key, value)`
-
-**Explanation:**
-Assigns a value to an input wire. Creates a `WireAssign` expression and updates the wire's assigned value. Raises `ValueError` if attempting to assign to an output wire.
-
-#### `keys(self)`
-
-**Explanation:**
-Returns a list of all wire names that match the adapter's direction. Used for iteration and introspection.
+These helpers ensure external IP participates naturally in the Assassyn IR while leaving the code generation and simulation stages to handle the concrete SystemVerilog glue.

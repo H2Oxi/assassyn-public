@@ -1,91 +1,87 @@
-# ExternalSV Support in the Simulator
+# External Module Utilities
 
-This document explains how the simulator generator integrates Verilog modules that are provided through the `ExternalSV` interface. It covers how the code generator discovers these modules, what Rust and C++ glue files are emitted, and how the runtime interacts with the generated bindings during simulation.
+Helper functions in `external.py` provide the simulator generator with the metadata it needs to wire `ExternalSV` blocks into the Rust runtime. The utilities focus on discovering value dependencies, collecting wire assignments, and producing manifest data for Verilator crates.
 
-## Overview
+## Section 0. Summary
 
-`ExternalSV` modules represent design blocks that live in standalone SystemVerilog sources instead of the core Assassyn IR. During simulator generation we build a Verilator-based foreign-function interface (FFI) crate for each external module and link those crates into the Rust simulator. Each crate exposes a safe Rust wrapper (`struct` with `set_*`/`get_*` helpers) while the simulator runtime handles scheduling of `eval`/`clock_tick` calls and data movement between the Rust world and the verilated model.
+During simulator generation we analyse the elaborated IR to determine what values must be cached, which external modules appear as pure stubs, and which Rust handles should be created. The APIs in this module centralise those analyses so other codegen passes (for example `modules.py` and `verilator.py`) can reuse the same bookkeeping.
 
-## Generation Workflow
+## Section 1. Exposed Interfaces
 
-1. **Discovery** – When `elaborate()` runs, `simulator.verilator.emit_external_sv_ffis()` collects the system’s `ExternalSV` modules and delegates to `external.generate_external_sv_crates()`. If none are present the Verilator workspace is skipped entirely.
-2. **Workspace preparation** – The Verilator output directory is cleared and recreated. A dedicated Cargo crate directory is created for every module (`verilated_<module>`), including `src/` and `rtl/` subdirectories.
-3. **Source staging** – The original SystemVerilog file referenced by `ExternalSV.file_path` is copied into the crate’s `rtl/` directory.
-4. **Metadata collection** – Port directions, bit widths, and signedness are mapped to both C and Rust scalar types (currently up to 64 bits). Clock and reset presence is recorded.
-5. **Code emission** – The generator emits the following artifacts per crate:
-   - `Cargo.toml` declaring the crate with a `libloading` dependency (no build script required).
-   - `src/lib.rs` exposing a safe Rust wrapper that loads symbols at runtime.
-   - `src/wrapper.cpp` implementing the C ABI that bridges to the verilated C++ model.
-   - `.verilator-lib-path` containing the absolute path to the freshly built shared library.
-   - `lib<crate>_ffi.{so|dylib|dll}` produced directly by the generator.
-6. **Manifest** – A `external_modules.json` file is written beside the simulator Cargo project summarising every external module (crate path, library name, struct wrapper, ports, clocks, resets, library path). The simulator generator later consumes this manifest to wire handles and link crates.
+### `external_handle_field`
 
-### Naming strategy
+```python
+def external_handle_field(module_name: str) -> str:
+```
 
-Crate names default to `verilated_<external_module_name>` (sanitised with `namify`). Dynamic library names follow `<crate>_ffi`. Numeric suffixes are added automatically to avoid collisions when multiple external modules resolve to the same basename.
+Returns the field name used on the simulator struct to store the FFI handle for a specific `ExternalSV` module. The result is derived from `namify(module_name)` with a `_ffi` suffix.
 
-## Generated Crate Details
+### `collect_external_wire_reads`
 
-### Prebuilt shared library
+```python
+def collect_external_wire_reads(module: Module) -> Set[Expr]:
+```
 
-The generator invokes Verilator and links the wrapper immediately:
-- Picks the Verilator executable from `ASSASSYN_VERILATOR` or falls back to `verilator` on `PATH`.
-- Requires `VERILATOR_ROOT` to locate headers and runtime sources.
-- Runs Verilator with `--cc` into a crate-local `build/verilated` directory.
-- Compiles the generated C++ together with `src/wrapper.cpp` using the host C++17 toolchain (`CXX`, or the first available `clang++`/`g++`/`c++`), emitting `lib<crate>_ffi.{so|dylib|dll}` in the crate root.
-- Records the absolute library path in `.verilator-lib-path`, which is later embedded into the Rust wrapper and the simulator manifest.
+Walks a module body and records all `WireRead` expressions that observe outputs of an `ExternalSV`. These reads must trigger value exposure or Rust-side caching to keep combinational outputs coherent.
 
-### `src/wrapper.cpp`
+### `collect_module_value_exposures`
 
-The wrapper exposes a C ABI tailored to the module’s ports:
-- `*_new`, `*_free`, and `*_eval` manage the verilated instance lifetime.
-- Optional `*_set_clk` / `*_set_rst` appear for clock or reset ports.
-- For each input port: `*_set_<port>(ModuleHandle*, <ctype>)` performs a narrow cast and assigns into the verilated instance.
-- For each output port: `*_get_<port>(ModuleHandle*)` returns the port value.
-- Types are generated as the closest matching C integer (`uint{8,16,32,64}_t` or signed equivalents).
+```python
+def collect_module_value_exposures(module: Module) -> Set[Expr]:
+```
 
-### `src/lib.rs`
+Uses the `expr_externally_used` analysis to find expressions whose results are consumed outside the module. The returned set is merged with wire reads so the simulator knows which computed values must be stored on the shared context.
 
-`lib.rs` wraps the C ABI in a Rust `struct` with runtime loading:
-- The shared library path is embedded via `include_str!("../.verilator-lib-path")`.
-- Functions are resolved with `libloading::Library`; failures panic with descriptive errors.
-- The wrapper tracks an owned `NonNull<ModuleHandle>`; `Drop` automatically calls `*_free`.
-- Inputs map to `set_<port>` methods consuming Rust scalar types (`u{8,16,32,64}` or signed variants). Outputs use `get_<port>`.
-- When clocks or resets exist we expose `set_clock`, `clock_tick`, `set_reset`, and `apply_reset`. Clock ticks toggle the clock low/high with interleaved `eval()` calls.
-- The `struct` name is derived from the symbol prefix (CamelCase). This name is used by the simulator to reference the handle field (`<module>_ffi`).
+### `collect_external_value_assignments`
 
-## Simulator Integration
+```python
+def collect_external_value_assignments(sys) -> DefaultDict[tuple, List[Tuple[ExternalSV, Wire]]]:
+```
 
-`modules.py` and related generator pieces consume the manifest data to bind external crates into the Rust simulator:
-- The simulator `Cargo.toml` adds path dependencies on every generated crate so that Cargo builds them alongside the main binary.
-- Each external module handle is stored on the simulator struct using `external_handle_field(<module>)`, naming it `<module>_ffi`.
-- When a wire assignment targets an external module input the generated Rust code:
-  ```rust
-  sim.<module>_ffi.set_<port>(ValueCastTo::<Ty>::cast(&value));
-  ```
-  The generator tracks which external modules received input updates during the current downstream invocation.
-- For wire reads from external outputs the generator emits a block that (for combinational modules) calls `eval()` before fetching the value to keep inputs and outputs in sync.
-- Downstream modules that interact with clocked external modules append `sim.<module>_ffi.clock_tick();` at the end of their body so the verilated design advances once per downstream evaluation.
-- Inline comments (`// External wire assign`, `/* External wire read */`) are included to make the generated Rust easier to audit.
+Iterates over all `ExternalSV` downstream modules in the system and groups their input assignments by the IR expression that produces the driving value. The mapping is later used to emit Rust glue that forwards values into the appropriate FFI handle.
 
-## Runtime Expectations
+### `lookup_external_port`
 
-- External modules without clocks are treated as combinational blocks: inputs are driven via `set_*` calls and `eval()` is automatically inserted immediately before an output read if inputs changed in the same downstream visit.
-- External modules with clocks rely on periodic `clock_tick()` calls from their owning downstream module. The simulator toggles the clock and performs two `eval()` calls (falling then rising edge). Resets, when present, can be asserted via `set_reset`/`apply_reset`.
-- The generated manifest lists absolute shared-library paths so higher-level tooling can validate or reload them if needed. The simulator relies on the runtime loader embedded in each crate, so missing or stale libraries trigger an immediate panic with the failing path.
+```python
+def lookup_external_port(external_specs, module_name: str, wire_name: str, direction: str):
+```
 
-## Environment Requirements and Customisation
+Given the manifest dictionary emitted by the Verilator pass, returns the `FFIPort` entry that matches the requested module, wire, and direction. This keeps port-type lookups in one place.
 
-- Install Verilator and ensure `VERILATOR_ROOT` points at the installation root (the generator fails early if the variable is missing).
-- Optional `ASSASSYN_VERILATOR` lets you override the Verilator binary location.
-- Provide a C++17-capable toolchain. Set `CXX` to the desired compiler, otherwise the generator probes `clang++`, `g++`, then `c++`.
-- To tweak build flags or linking strategy, adjust `_build_verilator_library()` in `python/assassyn/codegen/simulator/external.py`.
-- The glue layer that wires generated crates into the simulator config lives in `python/assassyn/codegen/simulator/verilator.py` (`emit_external_sv_ffis`).
+### `gather_expr_validities`
 
-## Debugging Tips
+```python
+def gather_expr_validities(sys) -> Tuple[Set[Expr], Dict[Module, Set[Expr]]]:
+```
 
-- Inspect `<simulator>/external_modules.json` to confirm the generator recognised the expected ports, clock/reset flags, and crate layout.
-- The generated crates live under `<simulator>/<verilator_dirname>/`. Running `cargo build` inside the simulator project rebuilds all external FFIs and provides compiler errors with direct source references.
-- To validate behaviour, you can instantiate the Rust wrappers manually from a standalone test harness and call the exposed methods (`set_*`, `get_*`, `clock_tick`) to mimic what the simulator does.
+Aggregates every expression that requires simulator-visible caching and produces both the global set and a per-module map. Callers use the result to create validity bits and optional value caches in the generated Rust code.
 
-This pipeline ensures `ExternalSV` modules compile into verilated models that integrate seamlessly with the Rust simulator, with a clear separation between generated glue code and template-driven build logic.
+### `has_module_body` / `is_stub_external`
+
+```python
+def has_module_body(module: Module) -> bool:
+def is_stub_external(module: Module) -> bool:
+```
+
+Helpers that distinguish fully elaborated modules from placeholder stubs. Downstream passes use them to decide whether an `ExternalSV` can be ignored during Rust code emission.
+
+The module also re-exports `iter_wire_assignments`, `collect_external_wire_reads`, and related helpers via `__all__` to keep imports concise.
+
+## Section 2. Internal Helpers
+
+### `_walk_block`
+
+Performs a shallow traversal of nested `Block` structures. The walker is reused by multiple collectors to avoid duplicating block iteration code.
+
+### `iter_wire_assignments`
+
+Depth-first iterator that yields every `WireAssign` inside a block hierarchy. This is how `collect_external_value_assignments` discovers which expressions drive an external input.
+
+### Helper Pipeline
+
+1. `collect_module_value_exposures` gathers values that escape the module through async calls, array writes, or other externally visible paths.
+2. `collect_external_wire_reads` adds explicit output reads from `ExternalSV` modules.
+3. `gather_expr_validities` merges the previous two sets, recording both the global exposure set and the owning module so the simulator can emit per-module caches and validity bits.
+4. `collect_external_value_assignments` produces the reverse mapping—given an exposed value, which external modules consume it—so Rust glue can drive the correct FFI setters.
+
+This flow ensures simulator code generation has the full picture of cross-module dataflow involving external SystemVerilog black boxes.
