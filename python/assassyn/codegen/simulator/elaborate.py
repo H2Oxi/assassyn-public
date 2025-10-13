@@ -10,68 +10,41 @@ from pathlib import Path
 
 from .modules import dump_modules
 from .simulator import dump_simulator
-from .external import generate_external_sv_crates
+from .verilator import emit_external_sv_ffis
 
-from ...ir.module.external import ExternalSV
 from ...utils import repo_path
 
 if typing.TYPE_CHECKING:
     from ...builder import SysBuilder
 
 
-def _resolve_workspace_paths(sys: "SysBuilder", config: dict[str, typing.Any]):
-    """Return workspace root and derived simulator/verilator paths."""
+def _resolve_paths(sys: "SysBuilder", config: dict[str, typing.Any]) -> tuple[Path, Path]:
+    """Return simulator and Verilator output directories."""
 
-    workspace_root = Path(config.get('path', os.getcwd()))
+    workspace = Path(config.get('path', os.getcwd()))
     simulator_dirname = (
         config.get('simulator_dirname')
         or config.get('dirname')
         or f"{sys.name}_simulator"
     )
-    simulator_path = workspace_root / simulator_dirname
+    simulator_path = workspace / simulator_dirname
     verilator_dirname = config.get('verilator_dirname', f"{sys.name}_verilator")
-    verilator_root = workspace_root / verilator_dirname
-    return workspace_root, simulator_path, verilator_root
+    verilator_root = simulator_path / verilator_dirname
+    return simulator_path, verilator_root
 
 
-def _populate_external_metadata(
-    sys: "SysBuilder",
-    config: dict[str, typing.Any],
-    simulator_path: Path,
-    verilator_root: Path,
-):
-    """Generate FFI crates for ExternalSV modules and attach metadata."""
+def _prepare_simulator_dir(simulator_path: Path, override_dump: bool) -> None:
+    """Reset simulator output directory and create required structure."""
 
-    external_modules = [
-        module for module in sys.modules + sys.downstreams if isinstance(module, ExternalSV)
-    ]
+    if simulator_path.exists() and override_dump:
+        shutil.rmtree(simulator_path)
 
-    ffi_specs = []
-    if external_modules:
-        ffi_specs = generate_external_sv_crates(
-            external_modules,
-            simulator_path,
-            verilator_root,
-        )
-    else:
-        shutil.rmtree(verilator_root, ignore_errors=True)
-
-    config['external_ffis'] = ffi_specs
-    config['verilator_output_root'] = verilator_root
-    config['simulator_output_root'] = simulator_path
-
-    if ffi_specs:
-        sys._external_ffi_specs = {  # pylint: disable=protected-access
-            spec.original_module_name: spec for spec in ffi_specs
-        }
-    else:
-        sys._external_ffi_specs = {}  # pylint: disable=protected-access
-
-    return ffi_specs
+    simulator_path.mkdir(parents=True, exist_ok=True)
+    (simulator_path / "src").mkdir(exist_ok=True)
 
 
-def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs) -> Path:
-    """Create the Cargo manifest for the generated simulator."""
+def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs: list[typing.Any]) -> Path:
+    """Emit Cargo.toml for the generated simulator project."""
 
     manifest_path = simulator_path / "Cargo.toml"
     runtime_path = Path(repo_path()) / "tools" / "rust-sim-runtime"
@@ -93,28 +66,11 @@ def _write_manifest(sys: "SysBuilder", simulator_path: Path, ffi_specs) -> Path:
 def elaborate_impl(sys: "SysBuilder", config: dict[str, typing.Any]):
     """Internal implementation of the elaborate function."""
 
-    workspace_root, simulator_path, verilator_root = _resolve_workspace_paths(sys, config)
+    simulator_path, verilator_root = _resolve_paths(sys, config)
 
-    # Clean up legacy flat-layout outputs (workspace/<name>_simulator) when present
-    if config.get("cleanup_legacy_layout", True):
-        if workspace_root.name == sys.name:
-            legacy_root = workspace_root.parent
-            if legacy_root:
-                for legacy in (
-                    legacy_root / simulator_path.name,
-                    legacy_root / verilator_root.name,
-                    legacy_root / f"{sys.name}_verilog",
-                ):
-                    if legacy.exists() and legacy != simulator_path and legacy != verilator_root:
-                        shutil.rmtree(legacy, ignore_errors=True)
+    _prepare_simulator_dir(simulator_path, config.get('override_dump', True))
 
-    if simulator_path.exists() and config.get('override_dump', True):
-        shutil.rmtree(simulator_path)
-
-    simulator_path.mkdir(parents=True, exist_ok=True)
-    (simulator_path / "src").mkdir(exist_ok=True)
-
-    ffi_specs = _populate_external_metadata(sys, config, simulator_path, verilator_root)
+    ffi_specs = emit_external_sv_ffis(sys, config, simulator_path, verilator_root)
 
     print(f"Writing simulator code to rust project: {simulator_path}")
 

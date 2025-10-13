@@ -8,7 +8,7 @@ This document explains how the simulator generator integrates Verilog modules th
 
 ## Generation Workflow
 
-1. **Discovery** – When `elaborate()` runs, `external.generate_external_sv_crates()` scans the system for `ExternalSV` modules. If none are present the Verilator workspace is skipped entirely.
+1. **Discovery** – When `elaborate()` runs, `simulator.verilator.emit_external_sv_ffis()` collects the system’s `ExternalSV` modules and delegates to `external.generate_external_sv_crates()`. If none are present the Verilator workspace is skipped entirely.
 2. **Workspace preparation** – The Verilator output directory is cleared and recreated. A dedicated Cargo crate directory is created for every module (`verilated_<module>`), including `src/` and `rtl/` subdirectories.
 3. **Source staging** – The original SystemVerilog file referenced by `ExternalSV.file_path` is copied into the crate’s `rtl/` directory.
 4. **Metadata collection** – Port directions, bit widths, and signedness are mapped to both C and Rust scalar types (currently up to 64 bits). Clock and reset presence is recorded.
@@ -80,11 +80,12 @@ The wrapper exposes a C ABI tailored to the module’s ports:
 - Optional `ASSASSYN_VERILATOR` lets you override the Verilator binary location.
 - Provide a C++17-capable toolchain. Set `CXX` to the desired compiler, otherwise the generator probes `clang++`, `g++`, then `c++`.
 - To tweak build flags or linking strategy, adjust `_build_verilator_library()` in `python/assassyn/codegen/simulator/external.py`.
+- The glue layer that wires generated crates into the simulator config lives in `python/assassyn/codegen/simulator/verilator.py` (`emit_external_sv_ffis`).
 
 ## Debugging Tips
 
 - Inspect `<simulator>/external_modules.json` to confirm the generator recognised the expected ports, clock/reset flags, and crate layout.
-- The generated crates live under `<workspace>/<verilator_dirname>/`. Running `cargo build` inside the simulator project rebuilds all external FFIs and provides compiler errors with direct source references.
+- The generated crates live under `<simulator>/<verilator_dirname>/`. Running `cargo build` inside the simulator project rebuilds all external FFIs and provides compiler errors with direct source references.
 - To validate behaviour, you can instantiate the Rust wrappers manually from a standalone test harness and call the exposed methods (`set_*`, `get_*`, `clock_tick`) to mimic what the simulator does.
 
 This pipeline ensures `ExternalSV` modules compile into verilated models that integrate seamlessly with the Rust simulator, with a clear separation between generated glue code and template-driven build logic.
