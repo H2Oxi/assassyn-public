@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import typing
-from collections import defaultdict
 
 from ...ir.visitor import Visitor
 from ...ir.block import Block, CondBlock, CycledBlock
@@ -15,7 +14,12 @@ from ...analysis import expr_externally_used
 from .callback_collector import collect_callback_intrinsics, CallbackMetadata
 from .utils import dtype_to_rust_type
 from ...ir.module.external import ExternalSV
-from .external import external_handle_field
+from .external import (
+    collect_external_value_assignments,
+    external_handle_field,
+    has_module_body,
+    lookup_external_port,
+)
 
 if typing.TYPE_CHECKING:
     from ...ir.module import Module
@@ -38,67 +42,15 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
         self.module_ctx = None
         self.callback_metadata = callback_metadata
         self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
-        self.external_value_assignments = self._collect_external_value_assignments(sys)
+        self.external_value_assignments = collect_external_value_assignments(sys)
         self.emitted_external_assignments = set()
-
-    def _collect_external_value_assignments(self, sys):
-        """Precompute external input assignments keyed by producing expression."""
-        assignments = defaultdict(list)
-
-        for module in getattr(sys, "downstreams", []):
-            if not isinstance(module, ExternalSV):
-                continue
-            body = getattr(module, "body", None)
-            if body is None:
-                continue
-            for assignment in self._iter_wire_assignments(body):
-                value = unwrap_operand(assignment.value)
-                if not isinstance(value, Expr):
-                    continue
-                parent_block = getattr(value, "parent", None)
-                producer_module = getattr(parent_block, "module", None)
-                if producer_module is None:
-                    continue
-                value_id = namify(value.as_operand())
-                assignments[(producer_module, value_id)].append((module, assignment.wire))
-        return assignments
-
-    @staticmethod
-    def _iter_wire_assignments(root: Block):
-        """Yield ``WireAssign`` nodes from nested blocks."""
-        stack = [root]
-        while stack:
-            block = stack.pop()
-            for elem in getattr(block, "body", []):
-                if isinstance(elem, Block):
-                    stack.append(elem)
-                elif isinstance(elem, WireAssign):
-                    yield elem
-
-    @staticmethod
-    def _has_body(module: Module) -> bool:
-        body = getattr(module, "body", None)
-        return body is not None and bool(getattr(body, "body", []))
-
-    def _lookup_external_port(self, module_name: str, wire_name: str, direction: str):
-        """Return the FFI port spec for the given external wire, if available."""
-
-        spec = self.external_specs.get(module_name)
-        if spec is None:
-            return None
-        target = namify(wire_name)
-        ports = spec.inputs if direction == "input" else spec.outputs
-        for port in ports:
-            if port.name == target:
-                return port
-        return None
 
     def visit_module(self, node: Module):
         """Visit a module and generate its implementation."""
         self.module_name = node.name
         self.module_ctx = node
 
-        if isinstance(node, ExternalSV) and not self._has_body(node):
+        if isinstance(node, ExternalSV) and not has_module_body(node):
             return self.visit_external_module(node)
 
         result = [f"\n// Elaborating module {self.module_name}"]
@@ -135,7 +87,7 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
         if spec is None:
             raise ValueError(f"Missing external FFI spec for module {owner.name}")
 
-        port_spec = self._lookup_external_port(owner.name, wire_name, "input")
+        port_spec = lookup_external_port(self.external_specs, owner.name, wire_name, "input")
         rust_ty = (
             port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
         )
