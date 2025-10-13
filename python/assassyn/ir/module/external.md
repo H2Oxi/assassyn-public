@@ -1,69 +1,77 @@
-# External SystemVerilog Support
+# External SystemVerilog Modules
 
-External modules let Assassyn integrate pre-existing SystemVerilog blocks directly into a system. The integration is implemented in three layers:
+`external.py` defines the frontend surface for integrating black-box SystemVerilog blocks into an Assassyn design. It layers a small amount of metadata and wiring helpers on top of `Downstream` so external IP behaves like a native module during IR construction, Verilog generation, and simulation.
 
-1. Intermediate Representation (IR) nodes that model wire assignments and reads.
-2. The `ExternalSV` frontend API that uses those IR nodes to describe the boundary of the foreign module.
-3. Verilog code generation that turns the recorded IR into concrete instantiations and wire hookups.
-4. TODO we could use verilator to convert external SV into dynamic link which can be used by our rust simulator. 
+-----
 
-This document explains first 3 layers and provides an end-to-end example based on `python/ci-tests/test_easy_external.py`.
+## Exposed Interfaces
 
-## IR Nodes for Wire Boundaries
+```python
+class ExternalSV(Downstream): ...
 
-Two expression types defined in `python/assassyn/ir/expr/expr.py` represent external wiring:
+class WireIn(Generic[DType]): ...
+class WireOut(Generic[DType]): ...
+class RegOut(Generic[DType]): ...
 
-- **`WireAssign`** (`python/assassyn/ir/expr/expr.py:740`): stores "drive this wire with that value" relationships. It accepts a `Wire` object and the driving `Value`. These nodes are created through the `wire_assign(wire, value)` helper (decorated with `@ir_builder`) so they are inserted into the IR when builders run.
+@external
+class MyIP(ExternalSV):
+    a: WireIn[UInt(32)]
+    b: WireIn[UInt(32)]
+    y: WireOut[UInt(32)]
+    __source__ = "rtl/my_ip.sv"
+    __module_name__ = "my_ip"
 
-- **`WireRead`** (`python/assassyn/ir/expr/expr.py:767`): represents "observe this external wire". The `wire_read(wire)` helper creates the node and preserves the data type carried by the wire, allowing the compiler to type-check downstream expressions.
+ip = MyIP()
+ip.in_assign(a=value_a, b=value_b)
+result = ip.y  # or ip.y[0] for RegOut
+```
 
-Both expressions inherit from the general `Expr` base class, so the rest of the compiler can analyze them uniformly with other operations.
+-----
 
-## ExternalSV Frontend API
+## Descriptor Helpers
 
-`ExternalSV` (`python/assassyn/ir/module/external.py`) extends the base `Module` with a thin façade over external SystemVerilog blocks:
+  * `WireIn[...]`, `WireOut[...]`, `RegOut[...]` are lightweight descriptors (`_WireAnnotation`) used in class annotations. They capture the port direction, element type (`DType`), and whether the signal is treated as a wire or a registered output.
+  * `Input`/`Output` remain as deprecated aliases for backward compatibility.
+  * During decoration each descriptor is normalized into `_ExternalWireDecl`, ensuring consumers downstream always observe typed `Wire` objects with consistent `kind` (`wire` or `reg`).
 
-- **Constructor surface**: Alongside the usual `file_path`, `module_name`, and optional `has_clock`/`has_reset` switches, callers can still spell out the boundary via explicit `in_wires`/`out_wires` dictionaries. In day-to-day code, the preferred path is to decorate subclasses with `@external` and declare ports through annotations: `WireIn[...]` for inputs, `WireOut[...]` for direct combinational outputs, and `RegOut[...]` for registered outputs that are consumed like read-only `RegArray` handles.
+-----
 
-- **Unified wire adapters**: Declared wires are stored in a single dictionary of `Wire` objects(`python/assassyn/ir/module/module.py`), and lightweight `DirectionalWires` views power both `self.in_wires` and `self.out_wires`. The adapter inspects its configured direction so one class cleanly handles input assignments and output reads.
+## @external Decorator
 
-- **IR integration hooks**: Driving an input—through `self.in_wires[name] = value`, the `in_assign()` helper, constructor keyword arguments, or even `module['a'] = value`—funnels through `wire_assign(...)`, producing a `WireAssign` IR node. Observing an output—by indexing `self.out_wires`, calling `module['c']`, using attribute-style access, or by capturing the return value of `in_assign()`—returns typed handles. `WireOut` ports immediately create `WireRead` values, while `RegOut` ports return a small proxy that must be indexed (e.g. `external_reg.reg_out[0]`) to record the read. `in_assign()` yields the external outputs in declaration order so callers can unpack them directly.
+  * The decorator validates that the class extends `ExternalSV`, walks `__annotations__`, and gathers all `WireIn`/`WireOut`/`RegOut` definitions into `_ExternalConfig`.
+  * Configuration fields such as `__source__`, `__module_name__`, `__has_clock__`, `__has_reset__`, and `__no_arbiter__` are captured so users can override them either on the subclass or at instantiation time.
+  * Getter/setter properties are installed lazily for each annotated attribute, enabling attribute-style access (`ext.y`) to read or drive wires.
 
-- **Metadata for downstream stages**: The constructor tags the instance with `Module.ATTR_EXTERNAL` and retains the populated wire dictionary, giving later passes full type/direction information for code emission and validation.
+-----
 
-These helpers provide a convenient, side-effect-free API while guaranteeing the IR faithfully records how the external module is wired.
+## Directional Wire Views
 
-## Code Generation Pipeline
+  * `DirectionalWires` exposes a dict-like API for inputs and outputs (`module.in_wires`, `module.out_wires`).
+  * Reads defer to `_ensure_output_exposed`, which enters a builder context when necessary to create a `wire_read` expression; registered outputs return an `_ExternalRegOutProxy` that enforces index `0`.
+  * Writes dispatch to `wire_assign` and update the underlying `Wire` so that subsequent IR traversal sees the same connection. Assignments can happen through `module.in_wires[...]`, direct attribute access, bracket syntax (`module['a'] = ...`), or the convenience wrapper `in_assign(...)`.
 
-The Verilog backend (`python/assassyn/codegen/verilog/design.py`) consumes those IR breadcrumbs to materialize SystemVerilog instances:
+-----
 
-- **Collect input drivers**: As the `CIRCTDumper` walks each block, every `WireAssign` pointing at an `ExternalSV` input is stored in a `pending_external_inputs` table keyed by the owning module.
+## ExternalSV Class
 
-- **Describe the black box**: `_generate_external_module_wrapper` synthesizes a PyCDE wrapper class whose port list and directions come straight from the stored wire table, aligning the Verilog-facing interface with the frontend description.
+  * **Construction**: resolves decorator supplied defaults, requires a `file_path`, and records `external_module_name`, `has_clock`, `has_reset`, along with module attributes like `Module.ATTR_EXTERNAL`.
+  * **Wire Registration**: instantiates real `Wire` objects for every declared input/output, storing them in `self._wires`. Optional keyword arguments passed to the constructor are validated and queued until a builder context is available (`_apply_pending_connections`).
+  * **IR Integration**: `in_assign()` pushes the builder onto the module body, drives any provided inputs, and returns the declared outputs in order (single object or tuple). Output reads are memoized per wire to keep the generated IR minimal.
+  * **Indexing Helpers**: `__getitem__` and `__setitem__` forward to the directional adapters, letting users treat the module like a small associative array of ports.
+  * **String Dump**: `__repr__` renders the external metadata, attached attributes, and the module body so debug dumps clearly mark external instantiations.
 
-- **Instantiate on demand**: The first `WireRead` for a given `ExternalSV` triggers emission of the actual PyCDE instance. The dumper drains the pending input table, threads through optional `clk`/`rst` hookups, and remembers the created instance so subsequent reads simply reference signals like `ext_inst.c`.
+-----
 
-## Example: `test_easy_external.py`
+## Registered Outputs
 
-`python/ci-tests/test_easy_external.py` demonstrates how to expose a SystemVerilog adder:
+  * `_ExternalRegOutProxy` provides a read-only wrapper that mimics `RegArray` indexing semantics. It only accepts index `0`, returning the associated `wire_read` expression, and exposes the output `dtype` for convenience in type-sensitive code.
 
-1. **Define the external block**:
-   ```python
-   @external
-   class ExternalAdder(ExternalSV):
-       a: WireIn[UInt(32)]
-       b: WireIn[UInt(32)]
-       c: WireOut[UInt(32)]
+-----
 
-       __source__ = "python/ci-tests/resources/adder.sv"
-       __module_name__ = "adder"
-   ```
-   The annotations declare each port, and the decorator resolves `__source__`/`__module_name__` into the configuration that `ExternalSV` consumes.
+## Typical Usage Patterns
 
-2. **Drive inputs and read outputs** inside a downstream module:
-   ```python
-   c = ext_adder.in_assign(a=a, b=b)
-   ```
-   `in_assign` records the two input connections via `WireAssign` and returns the single declared `WireOut` (`WireRead`), making the value immediately usable.
+  * **Combinational module**: `python/ci-tests/test_easy_external.py` uses `WireOut` to publish an external adder result directly to downstream logic.
+  * **Pipelined handshake**: `python/ci-tests/test_pipemul.py` declares `RegOut` ports for `out_valid` and the product register while coordinating `async_called` updates.
+  * **Nested instantiation**: `python/ci-tests/test_complex_external.py` constructs multiple `ExternalSV` instances inside a regular `Module`, chaining combinational logic with stateful registers.
 
-3. **Integrate the external module** just like native modules. We assumed the external module must be instantiated inside the downstream module, which make sure the value align with the wire connection. The system builder instantiates `ExternalAdder()` and passes it into `Adder.build`, allowing the rest of the design to treat `c` as any other value.
+These helpers ensure external IP participates naturally in the Assassyn IR while leaving the code generation and simulation stages to handle the concrete SystemVerilog glue.
