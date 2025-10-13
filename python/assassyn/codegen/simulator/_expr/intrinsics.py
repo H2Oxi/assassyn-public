@@ -8,6 +8,8 @@ This module contains helper functions to generate simulator code for intrinsic o
 
 from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic
 from ....utils import namify
+from ..utils import dtype_to_rust_type
+from ..callback_collector import get_current_callback_metadata
 from ..node_dumper import dump_rval_ref
 
 
@@ -38,29 +40,12 @@ def _codegen_module_triggered(node, module_ctx, sys, **_kwargs):
     return f"sim.{port_self}_triggered"
 
 
-def _codegen_has_mem_resp(node, module_ctx, sys, **_kwargs):
-    """Generate code for HAS_MEM_RESP intrinsic."""
-    dram_module = node.args[0]
-    dram_name = namify(dram_module.name)
-    return f"sim.{dram_name}_response.valid"
-
-
-def _codegen_get_mem_resp(node, module_ctx, sys, **_kwargs):
-    """Generate code for GET_MEM_RESP intrinsic."""
-    dram_module = node.args[0]
-    dram_name = namify(dram_module.name)
-    # Convert Vec<u8> to BigUint using from_bytes_le as documented
-    return f"BigUint::from_bytes_le(&sim.{dram_name}_response.data)"
-
-
 # Dispatch table for pure intrinsic operations
 _PURE_INTRINSIC_DISPATCH = {
     PureIntrinsic.FIFO_PEEK: _codegen_fifo_peek,
     PureIntrinsic.FIFO_VALID: _codegen_fifo_valid,
     PureIntrinsic.VALUE_VALID: _codegen_value_valid,
     PureIntrinsic.MODULE_TRIGGERED: _codegen_module_triggered,
-    PureIntrinsic.HAS_MEM_RESP: _codegen_has_mem_resp,
-    PureIntrinsic.GET_MEM_RESP: _codegen_get_mem_resp,
 }
 
 
@@ -103,13 +88,14 @@ def _codegen_send_read_request(node, module_ctx, sys, **_kwargs):
     dram_name = namify(dram_module.name)
     re_val = dump_rval_ref(module_ctx, sys, re)
     addr_val = dump_rval_ref(module_ctx, sys, addr)
-    return f"""if {re_val} {{
+    return f"""{{
+                    if {re_val} {{
                         unsafe {{
                             let mem_interface = &sim.mi_{dram_name};
                             let success = mem_interface.send_request(
                                 {addr_val} as i64,
                                 false,
-                                crate::modules::{dram_name}::callback_of_{dram_name},
+                                crate::modules::rust_callback,
                                 sim as *const _ as *mut _,
                             );
                             if success {{
@@ -122,7 +108,8 @@ def _codegen_send_read_request(node, module_ctx, sys, **_kwargs):
                         }}
                     }} else {{
                         false
-                    }}"""
+                    }}
+                }}"""
 
 
 def _codegen_send_write_request(node, module_ctx, sys, **_kwargs):
@@ -132,26 +119,82 @@ def _codegen_send_write_request(node, module_ctx, sys, **_kwargs):
     addr = node.args[2]
     data = node.args[3]  # pylint: disable=unused-variable
     dram_name = namify(dram_module.name)
-    we_val = dump_rval_ref(module_ctx, sys, we)
     addr_val = dump_rval_ref(module_ctx, sys, addr)
-    return f"""if {we_val} {{
+    we_val = dump_rval_ref(module_ctx, sys, we)
+    return f"""{{
+                    if {we_val} {{
                         unsafe {{
                             let mem_interface = &sim.mi_{dram_name};
                             let success = mem_interface.send_request(
                                 {addr_val} as i64,
                                 true,
-                                crate::modules::{dram_name}::callback_of_{dram_name},
+                                crate::modules::rust_callback,
                                 sim as *const _ as *mut _,
                             );
                             success
                         }}
                     }} else {{
                         false
-                    }}"""
+                    }}
+                }}"""
 
 
+def _codegen_use_dram(node, module_ctx, sys, **_kwargs):
+    """Generate code for USE_DRAM intrinsic (metadata handled elsewhere)."""
+    return None
 
 
+def _codegen_has_mem_resp(node, module_ctx, sys, **_kwargs):
+    """Generate code for HAS_MEM_RESP intrinsic."""
+    metadata = get_current_callback_metadata()
+    mem_rdata = metadata.mem_user_rdata
+    if not mem_rdata:
+        return "false"
+    return f"sim.{mem_rdata}.payload.is_empty() == false"
+
+
+def _codegen_mem_resp(node, module_ctx, sys, **_kwargs):
+    """Generate code for MEM_RESP intrinsic."""
+    metadata = get_current_callback_metadata()
+    mem_rdata = metadata.mem_user_rdata
+    if not mem_rdata:
+        rust_ty = dtype_to_rust_type(node.dtype)
+        return f"ValueCastTo::<{rust_ty}>::cast(&0)"
+    return f"sim.{mem_rdata}.payload.front().unwrap().clone()"
+
+
+def _codegen_mem_write(node, module_ctx, sys, **kwargs):
+    """Generate code for MEM_WRITE intrinsic."""
+    # pylint: disable=import-outside-toplevel
+    from ..port_mapper import get_port_manager
+
+    module_name = module_ctx.name
+    modules_for_callback = kwargs.get('modules_for_callback')
+    array = node.args[0]
+    idx = node.args[1]
+    value = node.args[2]
+    array_name = namify(array.name)
+    idx_val = dump_rval_ref(module_ctx, sys, idx)
+    value_val = dump_rval_ref(module_ctx, sys, value)
+    modules_for_callback["memory"] = module_name
+    modules_for_callback["store"] = array_name
+
+    # DRAM callback uses a reserved port
+    manager = get_port_manager()
+    port_idx = manager.get_or_assign_port(array_name, "DRAM_CALLBACK")
+
+    return f"""{{
+                    let stamp = sim.stamp - sim.stamp % 100 + 50;
+                    sim.{array_name}.write_port.push(
+                        ArrayWrite::new(
+                            stamp,
+                            {idx_val} as usize,
+                            {value_val}.clone(),
+                            "{module_name}",
+                            {port_idx},
+                        ),
+                    );
+                }}"""
 
 
 # Dispatch table for intrinsic operations
@@ -162,6 +205,11 @@ _INTRINSIC_DISPATCH = {
     Intrinsic.BARRIER: _codegen_barrier,
     Intrinsic.SEND_READ_REQUEST: _codegen_send_read_request,
     Intrinsic.SEND_WRITE_REQUEST: _codegen_send_write_request,
+    Intrinsic.USE_DRAM: _codegen_use_dram,
+    Intrinsic.HAS_MEM_RESP: _codegen_has_mem_resp,
+    Intrinsic.MEM_RESP: _codegen_mem_resp,
+    Intrinsic.GET_MEM_RESP: _codegen_mem_resp,
+    Intrinsic.MEM_WRITE: _codegen_mem_write,
 }
 
 
