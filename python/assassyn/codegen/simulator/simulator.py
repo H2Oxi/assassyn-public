@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import os
-from ...analysis import topo_downstream_modules, get_upstreams, expr_externally_used
+from ...analysis import topo_downstream_modules, get_upstreams
 from .utils import dtype_to_rust_type, int_imm_dumper_impl, fifo_name
 from ...builder import SysBuilder
-from ...ir.block import CycledBlock, Block
-from ...ir.expr import Expr, Bind, WireRead
+from ...ir.block import CycledBlock
+from ...ir.expr import Expr, Bind
 from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
-from .external import external_handle_field
-from ...utils import namify, repo_path, unwrap_operand
+from .external import (
+    external_handle_field,
+    gather_expr_validities,
+    is_stub_external,
+)
+from ...utils import namify, repo_path
 from .port_mapper import get_port_manager
 
 
@@ -60,101 +64,6 @@ def analyze_and_register_ports(sys):
     return manager, dram_modules
 
 
-def _collect_external_wire_reads(module):
-    """Return WireRead expressions that observe ExternalSV outputs."""
-
-    reads = set()
-
-    def visit_expr(expr):
-        if isinstance(expr, WireRead):
-            wire = expr.wire
-            owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-            if isinstance(owner, ExternalSV):
-                reads.add(expr)
-        if isinstance(expr, Expr):
-            for operand in expr.operands:
-                value = unwrap_operand(operand)
-                if isinstance(value, Expr):
-                    visit_expr(value)
-
-    def visit_block(block):
-        if block is None or not isinstance(block, Block):
-            return
-        for item in getattr(block, "body", []):
-            if isinstance(item, Expr):
-                visit_expr(item)
-            elif isinstance(item, Block):
-                visit_block(item)
-
-    visit_block(getattr(module, "body", None))
-    return reads
-
-
-def _collect_module_value_exposures(module):
-    """Collect expressions that need simulator-side caching."""
-
-    exprs = set()
-
-    def walk_expr(expr):
-        if expr_externally_used(expr, True):
-            exprs.add(expr)
-        for operand in expr.operands:
-            value = unwrap_operand(operand)
-            if isinstance(value, Expr):
-                walk_expr(value)
-
-    def walk_block(block):
-        if block is None or not isinstance(block, Block):
-            return
-        for item in getattr(block, "body", []):
-            if isinstance(item, Expr):
-                walk_expr(item)
-            elif isinstance(item, Block):
-                walk_block(item)
-
-    walk_block(getattr(module, "body", None))
-    return exprs
-
-
-def _gather_expr_validities(sys):
-    """Aggregate expressions whose values must be cached on the simulator."""
-
-    exprs = set()
-    module_expr_map = {}
-
-    def record(module, expr):
-        if not isinstance(expr, Expr):
-            return
-        exprs.add(expr)
-        module_expr_map.setdefault(module, set()).add(expr)
-
-    for module in sys.modules[:] + sys.downstreams[:]:
-        if isinstance(module, Downstream):
-            for expr in module.externals:
-                record(module, expr)
-
-        for expr in _collect_module_value_exposures(module):
-            record(module, expr)
-        for expr in _collect_external_wire_reads(module):
-            record(module, expr)
-
-        externals = getattr(module, 'externals', None)
-        if externals:
-            for expr in externals:
-                record(module, expr)
-
-    return exprs, module_expr_map
-
-
-def _is_stub_external(module):
-    """Return True if the external module has no synthesized body."""
-
-    if not isinstance(module, ExternalSV):
-        return False
-    body = getattr(module, "body", None)
-    body_insts = getattr(body, "body", []) if body is not None else []
-    return not body_insts
-
 
 def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-many-statements
                    sys: SysBuilder, config, fd):
@@ -195,7 +104,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     downstream_reset = []
     registers = []
 
-    expr_validities, module_expr_map = _gather_expr_validities(sys)
+    expr_validities, module_expr_map = gather_expr_validities(sys)
 
     # Begin simulator struct definition
     fd.write("pub struct Simulator { pub stamp: usize, ")
@@ -333,7 +242,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Module simulation functions
     simulators = []
     for module in sys.modules[:] + sys.downstreams[:]:
-        if _is_stub_external(module):
+        if is_stub_external(module):
             continue
         module_name = namify(module.name)
         fd.write(f"  fn simulate_{module_name}(&mut self) {{\n")
@@ -344,9 +253,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         else:
             # Dependency based triggering for downstream modules
             upstream_conds = []
-            print(f"Module {module_name} upstreams:")
             for upstream in get_upstreams(module):
-                print(f"  {upstream.name}")
                 upstream_name = namify(upstream.name)
                 upstream_conds.append(f"self.{upstream_name}_triggered")
 
@@ -407,7 +314,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
     # Add simulators for downstream modules
     fd.write("  let downstreams : Vec<fn(&mut Simulator)> = vec![")
     for downstream in downstreams:
-        if _is_stub_external(downstream):
+        if is_stub_external(downstream):
             continue
         module_name = downstream.name
         fd.write(f"Simulator::simulate_{module_name}, ")
