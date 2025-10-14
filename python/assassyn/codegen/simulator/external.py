@@ -11,6 +11,7 @@ from ...ir.expr import Expr, WireAssign, WireRead
 from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.module.module import Wire
+from ...ir.visitor import Visitor
 from ...utils import namify, unwrap_operand
 from .utils import dtype_to_rust_type
 
@@ -21,61 +22,83 @@ def external_handle_field(module_name: str) -> str:
     return f"{namify(module_name)}_ffi"
 
 
-def _walk_block(block: Block | None, visitor) -> None:
-    if block is None or not isinstance(block, Block):
-        return
-    for item in getattr(block, "body", []):
-        visitor(item)
+class _ModuleExprWalker(Visitor):
+    """Visitor helper that walks module expressions depth-first."""
+
+    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - interface hook
+        """Hook invoked for each visited expression."""
+
+    def visit_expr(self, node: Expr):  # pylint: disable=arguments-differ
+        self.handle_expr(node)
+        for operand in getattr(node, "operands", []):
+            value = unwrap_operand(operand)
+            if isinstance(value, Expr):
+                self.visit_expr(value)
+
+
+class _ExternalWireReadCollector(_ModuleExprWalker):
+    """Collect ``WireRead`` expressions that observe ExternalSV outputs."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads: Set[Expr] = set()
+
+    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - simple predicate
+        if not isinstance(expr, WireRead):
+            return
+        wire = expr.wire
+        owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+        if isinstance(owner, ExternalSV):
+            self.reads.add(expr)
+
+
+class _ModuleValueExposureCollector(_ModuleExprWalker):
+    """Collect expressions that need simulator-side caching."""
+
+    def __init__(self):
+        super().__init__()
+        self.exprs: Set[Expr] = set()
+
+    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - simple predicate
+        if expr_externally_used(expr, True):
+            self.exprs.add(expr)
+
+
+def _assignment_handled_by_producer(
+    value_expr: object,
+    external_value_assignments: Dict[tuple, List[Tuple[ExternalSV, Wire]]],
+) -> bool:
+    """Return True if the producer module already emits assignments for this value."""
+    if not isinstance(value_expr, Expr):
+        return False
+    parent_block = getattr(value_expr, "parent", None)
+    producer_module = getattr(parent_block, "module", None)
+    if producer_module is None:
+        return False
+    key = (producer_module, namify(value_expr.as_operand()))
+    return key in external_value_assignments
 
 
 def collect_external_wire_reads(module: Module) -> Set[Expr]:
     """Collect WireRead expressions that observe ExternalSV outputs."""
 
-    reads: Set[Expr] = set()
-
-    def visit_expr(expr):
-        if isinstance(expr, WireRead):
-            wire = expr.wire
-            owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-            if isinstance(owner, ExternalSV):
-                reads.add(expr)
-        if isinstance(expr, Expr):
-            for operand in expr.operands:
-                value = unwrap_operand(operand)
-                if isinstance(value, Expr):
-                    visit_expr(value)
-
-    def visitor(node):
-        if isinstance(node, Expr):
-            visit_expr(node)
-        elif isinstance(node, Block):
-            _walk_block(node, visitor)
-
-    _walk_block(getattr(module, "body", None), visitor)
-    return reads
+    body = getattr(module, "body", None)
+    if body is None:
+        return set()
+    collector = _ExternalWireReadCollector()
+    collector.visit_block(body)
+    return collector.reads
 
 
 def collect_module_value_exposures(module: Module) -> Set[Expr]:
     """Collect expressions that require simulator-side caching for a module."""
 
-    exprs: Set[Expr] = set()
-
-    def visit_expr(expr: Expr) -> None:
-        if expr_externally_used(expr, True):
-            exprs.add(expr)
-        for operand in expr.operands:
-            value = unwrap_operand(operand)
-            if isinstance(value, Expr):
-                visit_expr(value)
-
-    def visitor(node):
-        if isinstance(node, Expr):
-            visit_expr(node)
-        elif isinstance(node, Block):
-            _walk_block(node, visitor)
-
-    _walk_block(getattr(module, "body", None), visitor)
-    return exprs
+    body = getattr(module, "body", None)
+    if body is None:
+        return set()
+    collector = _ModuleValueExposureCollector()
+    collector.visit_block(body)
+    return collector.exprs
 
 
 def iter_wire_assignments(root: Block) -> Iterable[WireAssign]:
@@ -145,15 +168,9 @@ def codegen_external_wire_assign(
         return None
 
     value_expr = unwrap_operand(node.value)
-    if isinstance(value_expr, Expr):
-        parent_block = getattr(value_expr, "parent", None)
-        producer_module = getattr(parent_block, "module", None)
-        if producer_module is not None:
-            value_id = namify(value_expr.as_operand())
-            key = (producer_module, value_id)
-            if key in external_value_assignments:
-                # Assignment handled in producer module to preserve evaluation ordering.
-                return ""
+    if _assignment_handled_by_producer(value_expr, external_value_assignments):
+        # Assignment handled in producer module to preserve evaluation ordering.
+        return ""
 
     spec = external_specs.get(owner.name)
     if spec is None:

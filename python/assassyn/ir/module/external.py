@@ -127,7 +127,7 @@ def external(cls):
 
 def _read_output_value(module: ExternalSV, wire: Wire):
     '''Deprecated helper retained for backward compatibility.'''
-    return module._ensure_output_exposed(wire)
+    return module.ensure_output_exposed(wire)
 
 
 def _as_external_decl(spec, default_kind='wire') -> _ExternalWireDecl:
@@ -178,12 +178,12 @@ class _ExternalWireReadCollector(Visitor):
         self.reads: dict[Wire, WireRead] = {}
 
     def dispatch(self, node):
-        if self.reads and len(self.reads) == len(self._module._declared_out_wires):
+        if self.reads and len(self.reads) == len(self._module.declared_output_wires):
             return
         super().dispatch(node)
 
     def visit_block(self, node: Block):
-        if self.reads and len(self.reads) == len(self._module._declared_out_wires):
+        if self.reads and len(self.reads) == len(self._module.declared_output_wires):
             return
         super().visit_block(node)
 
@@ -251,7 +251,7 @@ class DirectionalWires:
         self._module._apply_pending_connections()
         wire = self._get_wire(key)
         if self._direction == 'output':
-            expr = self._module._ensure_output_exposed(wire)
+            expr = self._module.ensure_output_exposed(wire)
             if getattr(wire, 'kind', 'wire') == 'reg':
                 return _ExternalRegOutProxy(self._module, wire)
             return expr
@@ -445,6 +445,15 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
         collector.visit_block(self.body)
         for wire, expr in collector.reads.items():
             self._exposed_output_reads.setdefault(wire, expr)
+
+    def ensure_output_exposed(self, wire: Wire):
+        '''Public wrapper for exposing output wires as expressions.'''
+        return self._ensure_output_exposed(wire)
+
+    @property
+    def declared_output_wires(self):
+        '''Return declared output wires metadata.'''
+        return self._declared_out_wires
 
     @property
     def wires(self):
