@@ -11,7 +11,6 @@ from ...ir.expr import Expr, WireAssign, WireRead
 from ...utils import namify, unwrap_operand
 from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
-from .callback_collector import collect_callback_intrinsics, CallbackMetadata
 from .utils import dtype_to_rust_type
 from ...ir.module.external import ExternalSV
 from .external import (
@@ -29,18 +28,12 @@ if typing.TYPE_CHECKING:
 class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
     """Visitor for elaborating modules with ExternalSV support."""
 
-    def __init__(
-        self,
-        sys,
-        callback_metadata: CallbackMetadata | None = None,
-        external_specs: dict[str, typing.Any] | None = None,
-    ):
+    def __init__(self, sys, external_specs: dict[str, typing.Any] | None = None):
         super().__init__()
         self.sys = sys
         self.indent = 0
         self.module_name = ""
         self.module_ctx = None
-        self.callback_metadata = callback_metadata
         self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
         self.external_value_assignments = collect_external_value_assignments(sys)
         self.emitted_external_assignments = set()
@@ -146,17 +139,6 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
             id_expr = namify(node.as_operand())
             id_and_exposure = (id_expr, need_exposure)
 
-        kwargs = {}
-        if (
-            self.callback_metadata
-            and self.callback_metadata.memory
-            and self.callback_metadata.store
-        ):
-            kwargs['modules_for_callback'] = {
-                'memory': self.callback_metadata.memory,
-                'store': self.callback_metadata.store,
-            }
-
         code = (
             custom_code
             if custom_code is not None
@@ -164,7 +146,6 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
                 node,
                 self.module_ctx,
                 self.sys,
-                **kwargs,
             )
         )
 
@@ -270,9 +251,8 @@ def dump_modules(sys: SysBuilder, modules_dir):
     """Generate individual module files in the modules/ directory."""
     modules_dir.mkdir(exist_ok=True)
 
-    callback_metadata = collect_callback_intrinsics(sys)
     external_specs = getattr(sys, "_external_ffi_specs", {})
-    em = ElaborateModule(sys, callback_metadata, external_specs)
+    em = ElaborateModule(sys, external_specs)
 
     mod_rs_path = modules_dir / "mod.rs"
     with open(mod_rs_path, 'w', encoding="utf-8") as mod_fd:
@@ -286,36 +266,6 @@ use std::sync::Arc;
 
 """)
 
-        if (
-            callback_metadata.memory
-            and callback_metadata.store
-            and callback_metadata.mem_user_rdata
-        ):
-            mod_fd.write(f"""extern "C" fn rust_callback(req: *mut Request, ctx: *mut c_void) {{
-    unsafe {{
-        let req = &*req;
-        let sim: &mut Simulator = &mut *(ctx as *mut Simulator);
-        let cycles = (req.depart - req.arrive) as usize;
-        let stamp = sim.request_stamp_map_table
-            .remove(&req.addr)
-            .unwrap_or_else(|| sim.stamp);
-        sim.{callback_metadata.mem_user_rdata}.push.push(FIFOPush::new(
-            stamp + 100 * cycles,
-            sim.{callback_metadata.store}.payload[req.addr as usize].clone().try_into().unwrap(),
-            "{callback_metadata.memory}",
-        ));
-    }}
-}}
-
-""")
-        else:
-            mod_fd.write("""extern "C" fn rust_callback(req: *mut Request, ctx: *mut c_void) {
-    let _ = req;
-    let _ = ctx;
-}
-
-""")
-
         for module in sys.modules[:] + sys.downstreams[:]:
             module_name = namify(module.name)
             mod_fd.write(f"pub mod {module_name};\n")
@@ -325,6 +275,42 @@ use std::sync::Arc;
                 module_fd.write("""use sim_runtime::*;
 use sim_runtime::num_bigint::{BigInt, BigUint};
 use crate::simulator::Simulator;
+use std::ffi::c_void;
+
+""")
+
+                if module_name.startswith('DRAM'):
+                    module_fd.write(f"""pub extern "C" fn callback_of_{module_name}(
+    req: *mut Request, ctx: *mut c_void) {{
+    unsafe {{
+        let req = &*req;
+        let sim: &mut Simulator = &mut *(ctx as *mut Simulator);
+        let cycles = (req.depart - req.arrive) as usize;
+        let stamp = sim.request_stamp_map_table
+            .remove(&req.addr)
+            .unwrap_or_else(|| sim.stamp);
+
+        if req.type_id == 0 {{
+            // Read response
+            sim.{module_name}_response.valid = true;
+            sim.{module_name}_response.addr = req.addr as usize;
+            sim.{module_name}_response.data = vec![
+                (req.addr as u8) & 0xFF,
+                ((req.addr >> 8) as u8) & 0xFF,
+                ((req.addr >> 16) as u8) & 0xFF,
+                ((req.addr >> 24) as u8) & 0xFF
+            ];
+            sim.{module_name}_response.read_succ = true;
+            sim.{module_name}_response.is_write = false;
+        }} else {{
+            // Write response
+            sim.{module_name}_response.valid = true;
+            sim.{module_name}_response.addr = req.addr as usize;
+            sim.{module_name}_response.write_succ = true;
+            sim.{module_name}_response.is_write = true;
+        }}
+    }}
+}}
 
 """)
 
