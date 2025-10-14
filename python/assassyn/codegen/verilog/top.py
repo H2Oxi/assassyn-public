@@ -10,6 +10,7 @@ from .utils import (
     get_sram_info,
 )
 
+from ...analysis import topo_downstream_modules
 from ...ir.module import Downstream
 from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
@@ -207,9 +208,8 @@ def generate_top_harness(dumper):
     dumper.append_code('\n# --- Module Instantiations and Connections ---')
 
     all_modules = dumper.sys.modules + dumper.sys.downstreams
-    non_external_modules = [m for m in all_modules if not isinstance(m, ExternalSV)]
-    external_modules = [m for m in all_modules if isinstance(m, ExternalSV)]
-    instantiation_modules = non_external_modules + external_modules
+    downstream_order = topo_downstream_modules(dumper.sys)
+    instantiation_modules = list(dumper.sys.modules) + downstream_order
     module_connection_map = {}
     pending_connection_assignments = defaultdict(list)
     declared_cross_module_wires = set()
