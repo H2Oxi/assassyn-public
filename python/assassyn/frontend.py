@@ -14,8 +14,6 @@ from .ir.module.external import (
     WireIn,
     WireOut,
     RegOut,
-    Input,
-    Output,
 )
 from .ir.memory.sram import SRAM
 from .ir.memory.dram import DRAM

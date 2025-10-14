@@ -36,22 +36,24 @@ def _handle_expr(unwrapped, module_ctx):
     if isinstance(unwrapped, WireRead):
         wire = unwrapped.wire
         owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-        if isinstance(owner, ExternalSV) and getattr(wire, "kind", "wire") == "wire":
-            field_id = namify(unwrapped.as_operand())
-            handle_field = external_handle_field(owner.name)
-            method_suffix = namify(wire.name)
-            rust_ty = dtype_to_rust_type(unwrapped.dtype)
-            return (
-                "{\n"
-                f"        if sim.{field_id}_value.is_none() {{\n"
-                f"            sim.{handle_field}.eval();\n"
-                f"            let value = sim.{handle_field}.get_{method_suffix}();\n"
-                f"            let value = ValueCastTo::<{rust_ty}>::cast(&value);\n"
-                f"            sim.{field_id}_value = Some(value.clone());\n"
-                "        }\n"
-                f"        sim.{field_id}_value.as_ref().unwrap().clone()\n"
-                "    }"
-            )
+        if isinstance(owner, ExternalSV):
+            kind = getattr(wire, "kind", "wire")
+            if kind in ("wire", "reg"):
+                field_id = namify(unwrapped.as_operand())
+                handle_field = external_handle_field(owner.name)
+                method_suffix = namify(wire.name)
+                rust_ty = dtype_to_rust_type(unwrapped.dtype)
+                return (
+                    "{\n"
+                    f"        if sim.{field_id}_value.is_none() {{\n"
+                    f"            sim.{handle_field}.eval();\n"
+                    f"            let value = sim.{handle_field}.get_{method_suffix}();\n"
+                    f"            let value = ValueCastTo::<{rust_ty}>::cast(&value);\n"
+                    f"            sim.{field_id}_value = Some(value.clone());\n"
+                    "        }\n"
+                    f"        sim.{field_id}_value.as_ref().unwrap().clone()\n"
+                    "    }"
+                )
 
     # Figure out the ID format based on context
     parent_block = unwrapped.parent

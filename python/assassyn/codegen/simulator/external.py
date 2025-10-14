@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Set, Tuple
+from typing import Any, DefaultDict, Dict, Iterable, List, Set, Tuple
 
 from ...analysis import expr_externally_used
 from ...ir.block import Block
@@ -12,6 +12,7 @@ from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.module.module import Wire
 from ...utils import namify, unwrap_operand
+from .utils import dtype_to_rust_type
 
 
 def external_handle_field(module_name: str) -> str:
@@ -128,6 +129,79 @@ def lookup_external_port(external_specs, module_name: str, wire_name: str, direc
     return None
 
 
+def codegen_external_wire_assign(
+    node: WireAssign,
+    *,
+    external_specs: Dict[str, Any],
+    external_value_assignments: Dict[tuple, List[Tuple[ExternalSV, Wire]]],
+    value_code: str,
+) -> str | None:
+    """Produce simulator code for driving an ExternalSV input wire."""
+
+    wire = node.wire
+    owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+    wire_name = getattr(wire, "name", None)
+    if not isinstance(owner, ExternalSV) or not wire_name:
+        return None
+
+    value_expr = unwrap_operand(node.value)
+    if isinstance(value_expr, Expr):
+        parent_block = getattr(value_expr, "parent", None)
+        producer_module = getattr(parent_block, "module", None)
+        if producer_module is not None:
+            value_id = namify(value_expr.as_operand())
+            key = (producer_module, value_id)
+            if key in external_value_assignments:
+                # Assignment handled in producer module to preserve evaluation ordering.
+                return ""
+
+    spec = external_specs.get(owner.name)
+    if spec is None:
+        raise ValueError(f"Missing external FFI spec for module {owner.name}")
+
+    port_spec = lookup_external_port(external_specs, owner.name, wire_name, "input")
+    rust_ty = port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
+    handle_field = external_handle_field(owner.name)
+    method_suffix = namify(wire_name)
+
+    return (
+        f"// External wire assign: {owner.name}.{wire_name}\n"
+        f"sim.{handle_field}.set_{method_suffix}("
+        f"ValueCastTo::<{rust_ty}>::cast(&{value_code}));"
+    )
+
+
+def codegen_external_wire_read(
+    node: WireRead,
+    *,
+    external_specs: Dict[str, Any],
+) -> str | None:
+    """Produce simulator code for reading an ExternalSV output wire."""
+
+    wire = node.wire
+    owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+    wire_name = getattr(wire, "name", None)
+    if not isinstance(owner, ExternalSV) or not wire_name:
+        return None
+
+    spec = external_specs.get(owner.name)
+    if spec is None:
+        raise ValueError(f"Missing external FFI spec for module {owner.name}")
+
+    handle_field = external_handle_field(owner.name)
+    method_suffix = namify(wire_name)
+    rust_ty = dtype_to_rust_type(node.dtype)
+
+    eval_line = f"  sim.{handle_field}.eval();\n"
+
+    return (
+        "{\n"
+        f"{eval_line}  let value = sim.{handle_field}.get_{method_suffix}();\n"
+        f"  ValueCastTo::<{rust_ty}>::cast(&value)\n"
+        "}"
+    )
+
+
 def gather_expr_validities(sys) -> Tuple[Set[Expr], Dict[Module, Set[Expr]]]:
     """Aggregate expressions whose values must be cached on the simulator."""
 
@@ -172,6 +246,8 @@ def is_stub_external(module: Module) -> bool:
 
 
 __all__ = [
+    "codegen_external_wire_assign",
+    "codegen_external_wire_read",
     "collect_external_value_assignments",
     "collect_external_wire_reads",
     "collect_module_value_exposures",

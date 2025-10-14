@@ -1,6 +1,8 @@
 """Analysis utilities for Assassyn."""
 from collections import defaultdict, deque
-from ..ir.expr import Expr, FIFOPush,Bind
+from ..ir.expr import Expr, FIFOPush, Bind, WireAssign
+from ..ir.module.downstream import Downstream
+from ..ir.module.external import ExternalSV
 from .external_usage import expr_externally_used
 
 def topo_downstream_modules(sys):
@@ -51,9 +53,34 @@ def get_upstreams(module):
     """
     res = set()
 
-    for elem in module.externals.keys():
-        if isinstance(elem, Expr):
-            if not isinstance(elem, FIFOPush) and not isinstance(elem, Bind):
-                res.add(elem.parent.module)
+    externals = getattr(module, 'externals', {})
+    for elem, operands in externals.items():
+        if not isinstance(elem, Expr):
+            continue
+
+        if isinstance(elem, (FIFOPush, Bind)):
+            continue
+
+        parent_block = getattr(elem, 'parent', None)
+        upstream_module = getattr(parent_block, 'module', None)
+        if upstream_module is not None:
+            if isinstance(module, ExternalSV) and isinstance(upstream_module, Downstream):
+                # Skip dependencies that only exist to drive this module's input wires
+                # when the upstream is also a downstream (avoids false cycles).
+                assignments_only = True
+                for operand in operands:
+                    user = getattr(operand, 'user', None)
+                    if not isinstance(user, WireAssign):
+                        assignments_only = False
+                        break
+                    wire = getattr(user, 'wire', None)
+                    owner = getattr(wire, 'module', None) or getattr(wire, 'parent', None)
+                    if owner is not module:
+                        assignments_only = False
+                        break
+                if assignments_only:
+                    continue
+
+            res.add(upstream_module)
 
     return res

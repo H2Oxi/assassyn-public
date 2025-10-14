@@ -10,7 +10,8 @@ from typing import Dict, Optional
 from ...builder import Singleton
 from ..dtype import DType
 from ..block import Block
-from ..expr import wire_assign, wire_read
+from ..expr import Expr, WireRead, wire_assign, wire_read
+from ..visitor import Visitor
 from .downstream import Downstream
 from .module import Module, Wire
 
@@ -72,14 +73,6 @@ class RegOut:
         return _WireAnnotation('output', dtype, 'reg')
 
 
-class Input(WireIn):
-    '''Deprecated alias for WireIn for backward compatibility.'''
-
-
-class Output(WireOut):
-    '''Deprecated alias for WireOut for backward compatibility.'''
-
-
 def _ensure_property(cls, name: str, direction: str):
     '''Install attribute helpers for accessing external wires.'''
     if hasattr(cls, name):
@@ -133,27 +126,8 @@ def external(cls):
 
 
 def _read_output_value(module: ExternalSV, wire: Wire):
-    '''Create a WireRead for an output wire, ensuring builder context exists.'''
-    builder = Singleton.builder
-    if builder is None:
-        raise RuntimeError(
-            "External wire access requires an active SysBuilder context"
-        )
-
-    needs_context = builder.current_module is None or builder.current_block is None
-    if needs_context:
-        if module.body is None:
-            module.body = Block(Block.MODULE_ROOT)
-            module.body.parent = module
-            module.body.module = module
-        builder.enter_context_of('module', module)
-        builder.enter_context_of('block', module.body)
-        try:
-            return wire_read(wire)
-        finally:
-            builder.exit_context_of('block')
-            builder.exit_context_of('module')
-    return wire_read(wire)
+    '''Deprecated helper retained for backward compatibility.'''
+    return module._ensure_output_exposed(wire)
 
 
 def _as_external_decl(spec, default_kind='wire') -> _ExternalWireDecl:
@@ -195,6 +169,36 @@ def _normalize_decl_map(wire_map, default_kind='wire'):
     }
 
 
+class _ExternalWireReadCollector(Visitor):
+    '''Visitor that collects WireRead expressions attached to an ExternalSV module.'''
+
+    def __init__(self, module: 'ExternalSV'):
+        super().__init__()
+        self._module = module
+        self.reads: dict[Wire, WireRead] = {}
+
+    def dispatch(self, node):
+        if self.reads and len(self.reads) == len(self._module._declared_out_wires):
+            return
+        super().dispatch(node)
+
+    def visit_block(self, node: Block):
+        if self.reads and len(self.reads) == len(self._module._declared_out_wires):
+            return
+        super().visit_block(node)
+
+    def visit_expr(self, node: Expr):
+        if isinstance(node, WireRead):
+            wire = node.wire
+            owner = getattr(wire, 'module', None) or getattr(wire, 'parent', None)
+            if owner is self._module and wire not in self.reads:
+                self.reads[wire] = node
+        for operand in getattr(node, 'operands', []):
+            value = getattr(operand, 'value', operand)
+            if isinstance(value, Expr):
+                self.dispatch(value)
+
+
 class _ExternalRegOutProxy:
     '''Lightweight proxy that exposes read-only register semantics via indexing.'''
 
@@ -208,7 +212,7 @@ class _ExternalRegOutProxy:
                 raise IndexError("External RegOut only supports index 0")
         else:
             raise TypeError("External RegOut expects an integer index (0)")
-        return _read_output_value(self._module, self._wire)
+        return self._module._ensure_output_exposed(self._wire)
 
     @property
     def dtype(self):
@@ -247,10 +251,10 @@ class DirectionalWires:
         self._module._apply_pending_connections()
         wire = self._get_wire(key)
         if self._direction == 'output':
-            self._module._ensure_output_exposed(wire)
+            expr = self._module._ensure_output_exposed(wire)
             if getattr(wire, 'kind', 'wire') == 'reg':
                 return _ExternalRegOutProxy(self._module, wire)
-            return _read_output_value(self._module, wire)
+            return expr
         return wire.value
 
     def __setitem__(self, key, value):
@@ -398,6 +402,10 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
         if wire in self._exposed_output_reads:
             return self._exposed_output_reads[wire]
 
+        self._harvest_output_reads()
+        if wire in self._exposed_output_reads:
+            return self._exposed_output_reads[wire]
+
         builder = Singleton.builder
         if builder is None:
             raise RuntimeError(
@@ -428,6 +436,15 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
 
         self._exposed_output_reads[wire] = expr
         return expr
+
+    def _harvest_output_reads(self):
+        '''Populate cached output WireRead expressions using the visitor walker.'''
+        if not self._declared_out_wires or self.body is None:
+            return
+        collector = _ExternalWireReadCollector(self)
+        collector.visit_block(self.body)
+        for wire, expr in collector.reads.items():
+            self._exposed_output_reads.setdefault(wire, expr)
 
     @property
     def wires(self):

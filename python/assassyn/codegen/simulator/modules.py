@@ -8,12 +8,14 @@ from ...ir.visitor import Visitor
 from ...ir.block import Block, CondBlock, CycledBlock
 from ...ir.dtype import RecordValue
 from ...ir.expr import Expr, WireAssign, WireRead
-from ...utils import namify, unwrap_operand
+from ...utils import namify
 from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
 from .utils import dtype_to_rust_type
 from ...ir.module.external import ExternalSV
 from .external import (
+    codegen_external_wire_assign,
+    codegen_external_wire_read,
     collect_external_value_assignments,
     external_handle_field,
     has_module_body,
@@ -58,72 +60,18 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
 
         return "\n".join(result)
 
-    def _codegen_external_wire_assign(self, node: WireAssign) -> str | None:  # pylint: disable=too-many-locals
-        wire = node.wire
-        owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-        wire_name = getattr(wire, "name", None)
-        if not isinstance(owner, ExternalSV) or not wire_name:
-            return None
-
-        value_expr = unwrap_operand(node.value)
-        if isinstance(value_expr, Expr):
-            parent_block = getattr(value_expr, "parent", None)
-            producer_module = getattr(parent_block, "module", None)
-            if producer_module is not None:
-                value_id = namify(value_expr.as_operand())
-                key = (producer_module, value_id)
-                if key in self.external_value_assignments:
-                    # Assignment handled in producer module to preserve evaluation ordering.
-                    return ""
-
-        spec = self.external_specs.get(owner.name)
-        if spec is None:
-            raise ValueError(f"Missing external FFI spec for module {owner.name}")
-
-        port_spec = lookup_external_port(self.external_specs, owner.name, wire_name, "input")
-        rust_ty = (
-            port_spec.rust_type if port_spec is not None else dtype_to_rust_type(wire.dtype)
-        )
-        value = dump_rval_ref(self.module_ctx, self.sys, node.value)
-        handle_field = external_handle_field(owner.name)
-        method_suffix = namify(wire_name)
-
-        return (
-            f"// External wire assign: {owner.name}.{wire_name}\n"
-            f"sim.{handle_field}.set_{method_suffix}("
-            f"ValueCastTo::<{rust_ty}>::cast(&{value}));"
-        )
-
-    def _codegen_external_wire_read(self, node: WireRead) -> str | None:
-        wire = node.wire
-        owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-        wire_name = getattr(wire, "name", None)
-        if not isinstance(owner, ExternalSV) or not wire_name:
-            return None
-
-        spec = self.external_specs.get(owner.name)
-        if spec is None:
-            raise ValueError(f"Missing external FFI spec for module {owner.name}")
-
-        handle_field = external_handle_field(owner.name)
-        method_suffix = namify(wire_name)
-        rust_ty = dtype_to_rust_type(node.dtype)
-
-        eval_line = f"  sim.{handle_field}.eval();\n"
-
-        return (
-            "{\n"
-            f"{eval_line}  let value = sim.{handle_field}.get_{method_suffix}();\n"
-            f"  ValueCastTo::<{rust_ty}>::cast(&value)\n"
-            "}"
-        )
-
     def visit_expr(self, node: Expr):  # pylint: disable=too-many-locals
         """Visit an expression and generate its implementation."""
         from ._expr import codegen_expr  # pylint: disable=import-outside-toplevel
 
         if isinstance(node, WireAssign):
-            code = self._codegen_external_wire_assign(node)
+            value_code = dump_rval_ref(self.module_ctx, self.sys, node.value)
+            code = codegen_external_wire_assign(
+                node,
+                external_specs=self.external_specs,
+                external_value_assignments=self.external_value_assignments,
+                value_code=value_code,
+            )
             if code:
                 indent_str = " " * self.indent
                 return f"{indent_str}{code}\n"
@@ -131,7 +79,10 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
 
         custom_code = None
         if isinstance(node, WireRead):
-            custom_code = self._codegen_external_wire_read(node)
+            custom_code = codegen_external_wire_read(
+                node,
+                external_specs=self.external_specs,
+            )
 
         id_and_exposure = None
         if node.is_valued():
