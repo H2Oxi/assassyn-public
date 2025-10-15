@@ -1,10 +1,10 @@
 # System Generation
 
-This module provides system-level code generation utilities that orchestrate the generation of the complete Verilog system, including module analysis, array management, external module integration, and top-level harness generation.
+This module provides system-level code generation utilities that orchestrate the generation of the complete Verilog system, including module analysis, array management, external module integration, trigger bookkeeping, and top-level harness generation.
 
 ## Summary
 
-The system generation module is responsible for coordinating the generation of the entire Verilog system from an Assassyn system builder. It performs comprehensive analysis of the system structure, manages array write port assignments, handles external module integration, and orchestrates the generation of all modules and the top-level harness.
+The system generation module is responsible for coordinating the generation of the entire Verilog system from an Assassyn system builder. It performs comprehensive analysis of the system structure, manages array write port assignments, handles external module integration (including FFI wiring), and orchestrates the generation of all modules and the top-level harness.
 
 ## Exposed Interfaces
 
@@ -25,31 +25,30 @@ def generate_system(dumper, node):
 This function generates the complete Verilog system by performing comprehensive analysis and orchestration. It executes the following phases:
 
 1. **System Analysis Phase**:
-   - **SRAM Payload Identification**: Identifies SRAM payload arrays that need special handling
-   - **External Module Collection**: Finds all external modules used in the system
-   - **External Module Wrapper Generation**: Creates PyCDE wrapper classes for external modules
+   - **SRAM Payload Identification**: Identifies SRAM payload arrays that need special handling.
+   - **External Module Collection**: Finds all external modules referenced by the design (including callees discovered through async calls) and generates PyCDE wrapper classes for them upfront.
 
 2. **Array Management Phase**:
-   - **Write Port Assignment**: Assigns unique port indices to each module writing to each array
-   - **Array Module Generation**: Generates multi-port array modules for non-SRAM arrays
-   - **Array User Analysis**: Identifies which modules read from or write to each array
+   - **Write Port Assignment**: Assigns unique port indices to each module writing to an array, storing the mapping in `dumper.array_write_port_mapping`.
+   - **Array Module Generation**: Generates multi-port array modules for non-SRAM arrays via `visit_array`.
+   - **Array User Analysis**: Populates `dumper.array_users` with the modules that read or write each array.
 
 3. **Module Analysis Phase**:
-   - **Expression-to-Module Mapping**: Maps valued expressions to their containing modules
-   - **Downstream Dependency Analysis**: Determines dependencies for downstream modules
-   - **Async Call Analysis**: Maps async call relationships between modules
+   - **Dependency Tracking**: Records downstream dependencies using `get_upstreams`.
+   - **Async Call Analysis**: Fills `dumper.async_callees` so trigger counters can sum incoming credits.
+   - **External Wiring**: As modules are visited, accumulates `external_wire_assignments` so cross-module wires can be connected later.
 
 4. **Module Generation Phase**:
-   - **Regular Module Generation**: Generates code for all non-external modules
-   - **Downstream Module Generation**: Generates code for all downstream modules
-   - **Top-Level Harness Generation**: Generates the top-level system harness
+   - **Regular Module Generation**: Skips pure external stubs and generates code for all remaining modules.
+   - **Downstream Module Generation**: Processes downstream modules after regular modules.
+   - **Top-Level Harness Generation**: Marks `is_top_generation`, invokes `generate_top_harness`, then resets the flag.
 
 The function handles complex system-wide relationships:
 
-- **Multi-Port Array Management**: Ensures each array has unique write ports for each writing module
-- **External Module Integration**: Properly integrates external SystemVerilog modules
-- **Dependency Tracking**: Maintains proper dependency relationships for downstream modules
-- **Async Call Relationships**: Tracks which modules call which other modules
+- **Multi-Port Array Management**: Ensures each array has unique write ports for each writing module and that shared array writer modules are emitted before they are referenced.
+- **External Module Integration**: Tracks which values need to cross between producers and external consumers, and records the wiring information needed by the top-level harness.
+- **Dependency Tracking**: Maintains proper dependency relationships for downstream modules.
+- **Async Call Relationships**: Tracks which modules call which other modules so trigger counters can aggregate requests.
 
 **Project-specific Knowledge Required**:
 - Understanding of [system builder](/python/assassyn/builder.md)

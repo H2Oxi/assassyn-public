@@ -1,10 +1,10 @@
 # Verilog Design Generation
 
-This module provides the main Verilog design generation functionality, including the CIRCTDumper class that converts Assassyn IR into CIRCT-compatible Verilog code and the generate_design function that orchestrates the complete design generation process.
+This module provides the main Verilog design generation functionality, including the CIRCTDumper class that converts Assassyn IR into CIRCT-compatible Verilog code and the generate_design function that orchestrates the complete design generation process. The generator also accumulates the metadata required to stitch together external SystemVerilog modules and multi-port array writers.
 
 ## Summary
 
-The design generation module is the core of the Verilog backend, responsible for converting Assassyn intermediate representation into synthesizable Verilog code. It implements the credit-based pipeline architecture through the CIRCTDumper class, which handles module generation, array management, external module integration, and the complete design synthesis process.
+The design generation module is the core of the Verilog backend, responsible for converting Assassyn intermediate representation into synthesizable Verilog code. It implements the credit-based pipeline architecture through the CIRCTDumper class, which now handles module generation, array management, external module integration, trigger counter plumbing, and the complete design synthesis process.
 
 ## Exposed Interfaces
 
@@ -49,33 +49,34 @@ class CIRCTDumper(Visitor):
 
 The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog code. It inherits from the Visitor pattern and implements the credit-based pipeline architecture. The class maintains extensive state for managing:
 
-1. **Execution Control**: `wait_until`, `cond_stack`, `finish_conditions` for credit-based pipeline control
-2. **Module State**: `current_module`, `_exposes`, `exposed_ports_to_add` for module generation
-3. **Array Management**: `array_write_port_mapping`, `sram_payload_arrays` for multi-port array handling
-4. **External Integration**: `pending_external_inputs`, `instantiated_external_modules` for external module support
-5. **Code Generation**: `code`, `logs`, `indent` for Verilog code output
+1. **Execution Control**: `wait_until`, `cond_stack`, and `finish_conditions` track predicate stacking, wait-until clauses, and FINISH intrinsics.
+2. **Module State**: `current_module`, `_exposes`, `module_ctx`, and `exposed_ports_to_add` capture which values need to become ports.
+3. **Array Management**: `array_write_port_mapping`, `array_users`, `sram_payload_arrays`, and `memory_defs` orchestrate multi-port array writers and SRAM payloads.
+4. **External Integration**: `pending_external_inputs`, `instantiated_external_modules`, `external_wire_assignments`, `external_wire_assignment_keys`, `external_wire_outputs`, and `external_modules` keep track of how external SystemVerilog modules are instantiated and how their signals flow from producers to consumers.
+5. **Expression Naming**: `expr_to_name` and `name_counters` guarantee deterministic signal names whenever expression results must be reused across statements.
+6. **Code Generation**: `code`, `logs`, and `indent` store emitted lines and diagnostic information used later by the testbench.
 
 #### Key Methods
 
 **`visit_system`**: Generates code for the entire system by calling `generate_system()`
 
 **`visit_module`**: Generates a complete Verilog module with the following phases:
-1. **Analysis Phase**: Processes the module body and generates internal logic
-2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces
-3. **Code Integration**: Combines internal logic with module structure
-4. **Special Handling**: Manages SRAM modules, downstream modules, and driver modules
+1. **Analysis Phase**: Processes the module body, collecting exposes, async call metadata, and external wiring information.
+2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces, using the captured expose data.
+3. **Code Integration**: Combines the collected body statements with the module boilerplate and generator decorators.
+4. **Special Handling**: Resets external bookkeeping between modules, emits SRAM-specific prelude code, and avoids instantiating pure external stubs.
 
 **`visit_array`**: Generates multi-port array modules with:
-- Write port interfaces for each writing module
-- Multi-port write arbitration logic
-- Register-based storage with proper initialization
-- Output interface for reading modules
+- Write port interfaces for each writing module (based on `array_write_port_mapping`)
+- Multi-port arbitration loops that prioritise the last matching port
+- Register-based storage with programmable reset values
+- Outputs that feed downstream module array readers
 
-**`visit_expr`**: Delegates expression generation to the expression dispatch system and handles external value exposure
+**`visit_expr`**: Delegates expression generation to the expression dispatch system, emits helpful `#` comments with source locations, exposes valued expressions when `expr_externally_used` requires it, and defers wire reads to the external wiring machinery when applicable.
 
-**`visit_block`**: Manages conditional and cycled blocks by maintaining a condition stack for proper predicate generation
+**`visit_block`**: Manages conditional and cycled blocks by maintaining a condition stack for proper predicate generation; when a conditional contains logging or other side effects it exposes the condition to the outside world to keep the testbench accurate.
 
-**`expose`**: Registers expressions that need to be exposed as module outputs, handling different types (expr, array, fifo, trigger)
+**`expose`**: Registers expressions that need to be exposed as module outputs, handling different types (expr, array, fifo, trigger). The collected metadata ultimately drives both module-level port declarations and the top-level harness wiring.
 
 **`get_pred`**: Generates the current execution predicate by combining all conditions in the condition stack
 
@@ -92,9 +93,9 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 
 **`_walk_expressions`**: Recursively traverses blocks to find all expressions for analysis
 
-**`_generate_external_module_wrapper`**: Creates PyCDE wrapper classes for external SystemVerilog modules
+**`_generate_external_module_wrapper`**: Creates PyCDE wrapper classes for external SystemVerilog modules. If the external metadata defines explicit wires (and their direction), the wrapper mirrors them; otherwise it falls back to treating the declared ports as inputs for backwards compatibility. Clock/reset ports are emitted when requested by the metadata.
 
-**`_connect_array`**: Handles multi-port array connections between modules
+**`_connect_array`**: Handles multi-port array connections between modules by wiring each module’s per-port write enable/data/index signals into the shared array writer instance the dumper previously generated.
 
 **`_is_external_module`**: Determines if a module represents an external implementation
 

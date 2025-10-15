@@ -1,10 +1,10 @@
 # Node Reference Dumper
 
-This module provides functionality for converting Assassyn IR nodes into Rust code references during simulator generation. It implements a dispatch-based system that handles different types of nodes (arrays, ports, constants, modules, expressions) and generates appropriate Rust code for accessing their values in the simulator context.
+This module provides functionality for converting Assassyn IR nodes into Rust code references during simulator generation. It implements a dispatch-based system that handles different types of nodes (arrays, ports, constants, modules, expressions) and generates appropriate Rust code for accessing their values in the simulator context, including the lazy evaluation logic needed to interact with dynamically loaded external SystemVerilog modules.
 
 ## Section 0. Summary
 
-The node dumper is a critical component of the simulator code generation pipeline. It translates Assassyn IR nodes into Rust code that can access values in the simulator context. The module uses a dispatch table pattern to handle different node types efficiently, with special handling for cross-module references, FIFO operations, and value cloning requirements.
+The node dumper is a critical component of the simulator code generation pipeline. It translates Assassyn IR nodes into Rust code that can access values in the simulator context. The module uses a dispatch table pattern to handle different node types efficiently, with special handling for cross-module references, FIFO operations, value cloning requirements, and external FFIs that must be polled through shared-object handles.
 
 ## Section 1. Exposed Interfaces
 
@@ -110,13 +110,15 @@ This is the most complex handler, dealing with expression nodes that can represe
 
 1. **Cross-module references**: When an expression belongs to a different module than the current context, it generates code to access the value through the simulator's exposed value mechanism. This involves checking if the value exists and panicking if it doesn't.
 
-2. **FIFO peek operations**: Special handling for FIFO_PEEK intrinsics, which need to unwrap the optional value from the FIFO front.
+2. **External wire reads**: When reading from an `ExternalSV` wire, it emits a small block that (a) forces the external handle to evaluate if the cached value is missing, (b) converts the external data back into the simulator type using `ValueCastTo`, and (c) caches the cloned value in `sim.<expr>_value` before returning it. This keeps repeated reads within the same cycle efficient while still calling into the FFI when needed.
 
-3. **Value cloning**: For large values (>64 bits), the handler generates code to clone the value to avoid ownership issues in Rust.
+3. **FIFO peek operations**: Special handling for FIFO_PEEK intrinsics, which need to unwrap the optional value from the FIFO front.
 
-4. **Simple references**: For small values, the handler generates a simple reference without cloning.
+4. **Value cloning**: For large values (>64 bits), the handler generates code to clone the value to avoid ownership issues in Rust.
 
-The handler demonstrates the complexity of managing value references across the simulator's module boundaries and the need for careful handling of Rust's ownership system.
+5. **Simple references**: For small values, the handler generates a simple reference without cloning.
+
+The handler demonstrates the complexity of managing value references across the simulator's module boundaries and the need for careful handling of Rust's ownership system as well as external FFI lifetimes.
 
 ### _handle_str
 

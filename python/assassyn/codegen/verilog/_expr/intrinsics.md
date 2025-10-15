@@ -19,16 +19,16 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
 
 This function generates Python testbench code for logging operations, which are used for debugging and monitoring during simulation. It performs the following steps:
 
-1. **Format String Processing**: Extracts the format string from the first operand and processes it using Python's `Formatter` class
+1. **Format String Processing**: Extracts the format string from the first operand and processes it using Python's `Formatter` class. Placeholder conversions such as `:?` are mapped to Python's `!r` conversions to match the DSL semantics.
 2. **Argument Processing**: For each argument after the format string:
    - Exposes non-constant operands to the module's output ports
-   - Generates testbench signal references for exposed values
+   - Generates sanitized testbench signal references (removing `self.` prefixes and replacing punctuation) for exposed values
    - Handles signed integer conversion for proper display
 3. **Condition Generation**: Builds complex conditions based on:
    - Current execution predicate
-   - Condition stack (cycled blocks and conditional blocks)
+   - Condition stack (cycled blocks and conditional blocks), translating them into DUT-visible signals
    - Valid signals for exposed operands
-4. **Log Generation**: Creates Python print statements with proper formatting and conditional execution
+4. **Log Generation**: Creates Python print statements annotated with line information, module names, and formatted cycle counts so the Cocotb testbench can produce readable diagnostics.
 
 The function generates testbench code that:
 - Accesses module signals through the DUT (Device Under Test) hierarchy

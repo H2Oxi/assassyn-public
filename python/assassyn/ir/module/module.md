@@ -56,7 +56,7 @@ class Port:
 
 ```python
 class Wire:
-    def __init__(self, dtype, direction=None, module=None): ...
+    def __init__(self, dtype, direction=None, module=None, kind: str = 'wire'): ...
     @property
     def users(self): ...
     def __repr__(self): ...
@@ -220,35 +220,39 @@ Frontend API for pushing data into the port's FIFO. Returns a `FIFOPush` express
 
 The `Wire` class represents simple connection points, often used for external module interfaces.
 
-**Purpose:** Provides direct wire connections for external modules and simple signal routing.
+**Purpose:** Provides direct wire connections for external modules and simple signal routing. Wires can represent pure combinational connections (`kind='wire'`) or registered outputs (`kind='reg'`), mirroring the metadata carried by `ExternalSV` modules.
 
 **Member Fields:**
-- `dtype: DType` - The data type of the wire
-- `direction: str` - The wire direction ('input', 'output', or None)
-- `value: Value` - The assigned value for input wires
+- `dtype: DType | None` - The data type of the wire (optional for undeclared wires)
+- `direction: str | None` - The wire direction ('input', 'output', or None)
+- `value: Value | None` - The assigned value for input wires
 - `_users: list` - List of expressions that use this wire
-- `name: str` - The wire's name
-- `module: Module` - The owning module
-- `parent: Module` - Backward compatibility alias for module
+- `name: str | None` - The wire's name
+- `module: Module | None` - The owning module
+- `parent: Module | None` - Backward compatibility alias for module
+- `kind: str` - Storage hint (`'wire'` or `'reg'`)
 
 **Methods:**
 
-#### `__init__(self, dtype, direction=None, module=None)`
+#### `__init__(self, dtype, direction=None, module=None, kind='wire')`
 
 **Explanation:**
-Initializes a wire with the specified data type and optional direction. The constructor:
-1. Validates the dtype if provided
-2. Sets the direction and initializes other fields
-3. Establishes the parent-child relationship with the owning module
+Initializes a wire with the specified data type and optional direction/module metadata. The constructor validates the dtype when provided, records the owning module (setting both `module` and `parent` for legacy consumers), captures the requested storage `kind`, and initialises the cached value to `None`.
 
 #### `assign(self, value)`
 
 **Explanation:**
-Assigns a value to the wire. The method:
-1. Validates that the wire is not an output wire
-2. Stores the assigned value for later use
+Assigns a value to the wire. The method validates that the wire is not an output wire (output wires are driven by the external implementation) and stores the value for later code generation. This method is used for input wires in external module interfaces.
 
-This method is used for input wires in external module interfaces.
+#### `__repr__(self)`
+
+**Explanation:**
+Returns a string representation of the wire, including the dtype, direction, and (when different from the default) the storage kind.
+
+#### `as_operand(self)`
+
+**Explanation:**
+Returns a string suitable for use on the right-hand side of expressions. If the wire knows its owning module and name, it returns `<module>.<name>`; otherwise it falls back to the raw name or a generated identifier while preserving direction hints.
 
 ### Combinational Decorator
 

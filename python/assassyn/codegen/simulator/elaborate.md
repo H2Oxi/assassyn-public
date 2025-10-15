@@ -4,7 +4,7 @@ This module provides the main entry point for generating Rust-based simulators f
 
 ## Section 0. Summary
 
-The simulator elaboration process generates a complete Rust project that implements the credit-based pipeline architecture described in the [simulator design document](../../../docs/design/internal/simulator.md). The generated simulator faithfully executes the high-level execution model by translating Assassyn operations into corresponding Rust operations, with special handling for register writes, stage registers, and asynchronous calls.
+The simulator elaboration process generates a complete Rust project that implements the credit-based pipeline architecture described in the [simulator design document](../../../docs/design/internal/simulator.md). Besides translating Assassyn operations into Rust with proper handling for register writes, pipeline stage scheduling, and asynchronous calls, the elaborator now understands external SystemVerilog FFIs. During elaboration we emit stub crates for every external SV binding, add them as workspace dependencies, and surface the FFI handles in the generated simulator so that Rust code can drive co-simulated peripherals.
 
 ## Section 1. Exposed Interfaces
 
@@ -29,9 +29,20 @@ def elaborate(sys, **config):
 
 **Explanation:**
 
-This function orchestrates the complete simulator generation process. It first resets the global port manager to ensure clean state for port assignments, then delegates to `elaborate_impl` for the actual generation work. After generation, it attempts to format the generated Rust code using `cargo fmt` if available.
+This public entry point orchestrates the complete simulator generation process. It first resets the global port manager (via `reset_port_manager`) so array port numbering starts from a clean state, delegates the heavy lifting to `elaborate_impl`, and finally makes a best-effort `cargo fmt` run over the generated crate. Formatting failures (missing cargo or fmt errors) are downgraded to warnings so pipelines can keep moving.
 
-The function handles the coordination between different components of the simulator generation pipeline, ensuring proper initialization and cleanup of global state. The port manager reset is particularly important for testing scenarios where multiple compilations might be performed in the same process.
+The wrapper is intentionally thin so that doctests and unit tests can call `elaborate_impl` directly while still keeping the global state reset/formatting behaviour available to CLI users.
+
+### _write_manifest
+
+```python
+def _write_manifest(simulator_path: Path, sys_name: str, ffi_specs) -> Path:
+    """Write the Cargo manifest for the generated simulator crate."""
+```
+
+**Explanation:**
+
+This helper writes `Cargo.toml` into the simulator directory. In addition to the fixed `sim-runtime` dependency (resolved via a relative path inside the repository) it now iterates over `ffi_specs`, wiring every generated external SystemVerilog bridge crate into the manifest using paths relative to the simulator root. Returning the manifest path keeps the helper easy to test and lets callers feed it straight into `cargo fmt`.
 
 ## Section 2. Internal Helpers
 
@@ -49,17 +60,17 @@ def elaborate_impl(sys, config):
 
 This function performs the core work of simulator generation. It follows these steps:
 
-1. **Directory Setup**: Creates and optionally cleans the simulator output directory based on the `override_dump` configuration option. The directory structure includes a `src` subdirectory for Rust source files.
+1. **Directory Setup**: Derives the output paths (simulator root and optional Verilator workspace), removes the simulator directory when `override_dump` is `True`, and ensures `src/` exists.
 
-2. **Project Configuration**: Generates a `Cargo.toml` manifest file that defines the Rust project with dependencies on the `sim-runtime` crate. The project name is derived from the system name.
+2. **External FFI Discovery**: Calls `emit_external_sv_ffis` to synthesise Rust crates that wrap every `ExternalSV` module used by the system. The helper returns `ffi_specs`, which describe crate names, on-disk locations, and whether a clocked callback is required.
 
-3. **Code Generation**: Orchestrates the generation of Rust source files:
-   - Calls `dump_modules` to generate the `modules` directory containing individual module implementations
-   - Calls `dump_simulator` to generate the main `simulator.rs` file containing the simulator context and execution logic
-   - Copies the template `main.rs` file to provide the entry point
+3. **Project Configuration**: Invokes `_write_manifest` so the generated Cargo manifest depends on `sim-runtime` and all FFI crates. The project name is derived from `sys.name`, and `rustfmt.toml` is copied alongside the manifest so formatting is deterministic.
 
-4. **Formatting**: Copies the project's `rustfmt.toml` configuration to ensure consistent code formatting.
+4. **Code Generation**: Orchestrates the generation of Rust source files:
+   - Calls `dump_modules` to generate the `modules` directory with per-module implementations (including DRAM callbacks and external handle stubs)
+   - Calls `dump_simulator` to generate `src/simulator.rs`, passing the configuration so that simulator state mirrors the available externals
+   - Copies the pre-baked `main.rs` template that wires everything into a runnable binary
 
-The function creates a complete, self-contained Rust project that can be compiled and executed to simulate the Assassyn system. The generated simulator implements the credit-based pipeline architecture with proper handling of register arrays, stage registers, and asynchronous module communication as described in the [simulator design document](../../../docs/design/internal/simulator.md).
+5. **Return Value**: Propagates the manifest path so callers can chain further tooling (formatters, builds, or tests) without recomputing the location.
 
-The implementation matches the behavior of the Rust backend's elaborate function, ensuring consistency between Python and Rust implementations of the simulator generation process.
+The implementation mirrors the Rust backend (see `src/backend/simulator/elaborate.rs`) so that both code paths share behaviour: array port allocation, DRAM response plumbing, and external FFI visibility all match the canonical simulator runtime.

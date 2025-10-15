@@ -1,6 +1,6 @@
 # Verilog Cleanup and Signal Generation
 
-This module provides post-generation cleanup utilities for Verilog code generation, handling signal generation for module interconnections, memory interfaces, and port management.
+This module provides post-generation cleanup utilities for Verilog code generation, handling signal generation for module interconnections, memory interfaces, port management, and the extra bookkeeping required to surface values for external SystemVerilog FFIs.
 
 ## Summary
 
@@ -20,25 +20,30 @@ def cleanup_post_generation(dumper):
 This is the main cleanup function that generates all the necessary control signals and interconnections after the primary Verilog code generation is complete. It performs the following steps:
 
 1. **Execution Signal Generation**: Creates the `executed_wire` signal that determines when a module should execute:
-   - For downstream modules: Combines execution signals from dependencies
-   - For regular modules: Combines trigger conditions and wait_until predicates
+   - For downstream modules: Gathers upstream dependencies from `dumper.downstream_dependencies` and ORs their `executed` flags.
+   - For regular modules: ANDs the trigger-counter pop-valid input with any active `wait_until` predicate recorded during expression lowering.
 
-2. **Finish Signal Generation**: Generates the `finish` signal by combining all finish conditions with their execution predicates
+2. **Finish Signal Generation**: Reduces every `(predicate, exec_signal)` pair queued in `dumper.finish_conditions` into the `self.finish` output.
 
-3. **SRAM Control Signal Generation**: For SRAM modules, generates memory interface signals including write enable, address selection, and data routing
+3. **SRAM Control Signal Generation**: When the current module wraps an SRAM payload, `generate_sram_control_signals` derives write enables, addresses, and data from the exposed array accesses, producing the handshakes expected by the memory blackbox.
 
-4. **Array Write Signal Generation**: For each array, generates port-based write signals:
-   - Groups writes by source module
-   - Creates write enable signals for each port
-   - Builds multiplexer chains for write data and address selection
+4. **Array Write Signal Generation**: For each array exposed through `dumper._exposes`:
+   - Filters out SRAM payload arrays (already handled by the SRAM logic).
+   - Groups writes by source module and maps them onto the precomputed port indices stored in `dumper.array_write_port_mapping`.
+   - Emits write-enable, write-data, and write-index signals per port. Multi-writer modules use `build_mux_chain` to pick the correct payload.
 
-5. **Port Signal Generation**: For FIFO ports, generates push/pop control signals:
-   - Push signals: Combines push predicates with ready signals
-   - Pop signals: Generates pop ready conditions
+5. **FIFO Signal Generation**: For every port exposure:
+   - Aggregates push predicates, applies backpressure via the parent module's `fifo_*_push_ready` signals, and emits valid/data assignments.
+   - Aggregates pop predicates and produces the module-local `*_pop_ready` backpressure signal.
 
-6. **Module Trigger Signal Generation**: For module calls, generates trigger signals by summing all async call predicates
+6. **Module Trigger Signal Generation**: When async calls target another module, sums all predicates (each converted to an 8-bit increment) and routes the result into `<callee>_trigger`.
 
-7. **Exposed Signal Generation**: For exposed values, creates output ports and valid signals
+7. **External Exposure Generation**: For every exposed expression that must leave the module:
+   - Appends `expose_<name>`/`valid_<name>` port declarations to `dumper.exposed_ports_to_add`.
+   - Emits assignments that drive the value and its validity.
+   - Skips raw `Wire` objects, because those are bridged through dedicated external wiring handled elsewhere.
+
+8. **Bookkeeping**: Records `self.executed = executed_wire` as the last assignment, ensuring downstream consumers and the top-level harness can observe the execution result.
 
 **Project-specific Knowledge Required**:
 - Understanding of [CIRCTDumper](/python/assassyn/codegen/verilog/design.md) class structure
@@ -79,7 +84,7 @@ def build_mux_chain(dumper, writes, dtype):
 
 **Explanation**
 
-This helper function builds a multiplexer chain for handling multiple write operations to the same array location from the same module. It creates a cascaded multiplexer structure where each write operation is conditionally selected based on its predicate.
+This helper function builds a multiplexer chain for handling multiple write operations to the same array location from the same module. It creates a cascaded multiplexer structure where each write operation is conditionally selected based on its predicate. Type mismatches are reconciled through `dump_type_cast` so the generated hardware preserves bit widths.
 
 The function:
 1. Takes the first write value as the base case

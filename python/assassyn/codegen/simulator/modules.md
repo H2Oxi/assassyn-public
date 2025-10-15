@@ -6,7 +6,7 @@ in the folder `modules/` of the generated code.
 
 ## Section 0. Summary
 
-The module generation system translates Assassyn IR modules into Rust simulation code. Each module (both pipeline stages and downstream modules) is converted into a Rust function that can be executed by the simulator host. The system handles different module types, generates appropriate callback functions for DRAM modules, and manages cross-module communication through exposed values in the simulator context.
+The module generation system translates Assassyn IR modules into Rust simulation code. Each module (both pipeline stages and downstream modules) is converted into a Rust function that can be executed by the simulator host. In addition to the existing DRAM callback generation and cross-module exposure tracking, the generator now understands external SystemVerilog modules: it threads FFI handle specifications into every module, emits typed setters/getters for cross-language ports, and injects the glue that keeps external wires coherent with the simulator state.
 
 ## Section 1. Exposed Interfaces
 
@@ -18,9 +18,7 @@ def dump_modules(sys: SysBuilder, modules_dir: Path) -> bool:
 
 Generates individual module files in the modules/ directory for simulator code generation.
 
-This function creates separate files for each module and a mod.rs file for declarations.
-It iterates over all modules and downstreams in the system builder and generates
-corresponding Rust implementation files.
+This function prepares `modules/mod.rs` (with the imports required by generated code, including `libloading`, `VecDeque`, and `sim_runtime` utilities), gathers external FFI specifications attached to the system, and then iterates over every module/downstream to create `<module>.rs` implementations.
 
 **Parameters:**
 - `sys`: The system builder containing all modules to be generated
@@ -29,7 +27,7 @@ corresponding Rust implementation files.
 **Returns:**
 - `bool`: Always returns True upon successful completion
 
-**Explanation:** This function is the main entry point for module code generation. It creates the modules directory, generates a mod.rs file with imports and module declarations, and creates individual .rs files for each module. For DRAM modules, it also generates callback functions for Ramulator2 integration. The function uses the `ElaborateModule` visitor to traverse each module's IR and generate corresponding Rust code. The generated code follows the simulator execution model described in [simulator.md](../../../docs/design/internal/simulator.md), where each module function returns a boolean indicating successful execution or blocking by `wait_until` intrinsics.
+**Explanation:** This function is the main entry point for module code generation. It creates the modules directory, writes `mod.rs` with the shared `use` statements, and instantiates an `ElaborateModule` visitor seeded with the system-wide external FFI specs. For each module it writes `<module>.rs`, dumps DRAM callbacks when necessary, and lets the visitor produce the function body. External SystemVerilog modules are emitted as Rust stubs that expose their FFI handles without generating a body, allowing the runtime to call into shared objects. The generated code follows the simulator execution model described in [simulator.md](../../../docs/design/internal/simulator.md), where each module function returns a boolean indicating successful execution or blocking by `wait_until` intrinsics.
 
 ## Section 2. Internal Helpers
 
@@ -41,7 +39,7 @@ class ElaborateModule(Visitor):
 
 Visitor class for elaborating modules with multi-port write support.
 
-**Explanation:** This visitor class implements the core module-to-Rust translation logic. It traverses the IR representation of modules and generates corresponding Rust code that can be executed by the simulator. The visitor handles different IR node types including expressions, blocks, and immediate values, translating them into appropriate Rust constructs.
+**Explanation:** This visitor class implements the core module-to-Rust translation logic. It now accepts optional `external_specs` so that generated code can invoke the correct FFI helper for every external SystemVerilog module. During construction it also precomputes `external_value_assignments` (mapping exported IR values to external sinks) and tracks which assignments have already been emitted, avoiding duplicate setter calls. The visitor traverses the IR representation of modules and generates corresponding Rust code that can be executed by the simulator, handling expressions, blocks, immediate values, and the new external wire operations.
 
 #### `__init__`
 
@@ -53,8 +51,9 @@ Initialize the module elaborator.
 
 **Parameters:**
 - `sys`: The system builder containing modules to elaborate
+- `external_specs`: Optional mapping of external module names to FFI descriptors
 
-**Explanation:** Sets up the visitor with system context, initializes indentation tracking for code formatting, and prepares module context tracking for proper code generation.
+**Explanation:** Sets up the visitor with system context, initializes indentation tracking for code formatting, captures the FFI spec registry, and precomputes which internal values must be forwarded into external modules by calling `collect_external_value_assignments`. The visitor also tracks which assignments have already been emitted so that repeated reads in a single cycle do not re-trigger setters.
 
 #### `visit_module`
 
@@ -70,7 +69,7 @@ Visit a module and generate its Rust implementation.
 **Returns:**
 - `str`: Complete Rust function implementation for the module
 
-**Explanation:** Generates a Rust function with signature `pub fn <module_name>(sim: &mut Simulator) -> bool`. The function traverses the module body using the visitor pattern and returns true to indicate successful execution. This function is called by `dump_modules` for each module in the system. The generated function follows the simulator execution model where modules return `true` for successful execution or `false` when blocked by `wait_until` intrinsics.
+**Explanation:** Generates a Rust function with signature `pub fn <module_name>(sim: &mut Simulator) -> bool`. External SystemVerilog modules that do not have a Python body are short-circuited to `visit_external_module`, producing a stub that simply returns `true` (the FFI handle drives the real behaviour). For internal modules the visitor traverses the body and returns `true` on success, mirroring the simulator execution model where `false` indicates the module was blocked by `wait_until`.
 
 #### `visit_expr`
 
@@ -86,7 +85,12 @@ Visit an expression and generate its Rust implementation.
 **Returns:**
 - `str`: Rust code for the expression with proper indentation
 
-**Explanation:** Delegates expression code generation to the [_expr](./_expr/) module using `codegen_expr`. If the expression is valued and externally used by other modules, it generates code to expose the value in the simulator context as `sim.<expr>_value = Some(value)`. This enables cross-module communication in the generated simulator. The function also adds location comments (`// @<location>`) when available to aid in debugging and tracing generated code back to the original source.
+**Explanation:** Delegates expression code generation to the [_expr](./_expr/) module using `codegen_expr`, but intercepts the cases that involve external modules:
+- **WireAssign**: Uses `codegen_external_wire_assign` to emit setter calls for external handles. When the helper returns code, the visitor plugs in the generated snippet (typed via `ValueCastTo`) and avoids emitting default expression code.
+- **WireRead**: Optionally replaces the generated code with a custom snippet from `codegen_external_wire_read` so simulator reads go through the cached FFI handle.
+- **Exposed Values**: When an expression is valued and needs exposure, the visitor generates `let` bindings plus `sim.<id>_value = Some(<clone>)`. If the value feeds an external module input, the visitor also emits the corresponding `handle.set_*` calls exactly once per (module, value) pair.
+
+Location comments (`// @<location>`) are preserved for easier debugging. Expressions that do not need custom handling fall back to the standard `_expr` codegen.
 
 #### `visit_int_imm`
 
@@ -119,11 +123,20 @@ Visit a block and generate its Rust implementation.
 - `str`: Rust code for the block with proper control flow
 
 **Explanation:** Handles different block types:
-- **CondBlock**: Generates `if <condition> { ... }` statements
-- **CycledBlock**: Generates `if sim.stamp / 100 == <cycle> { ... }` for time-based execution
-- **Regular Block**: Processes all elements sequentially
+- **CondBlock**: Evaluates the condition (emitting it if the condition itself contains expressions) then wraps the child body in an `if`.
+- **CycledBlock**: Generates `if sim.stamp / 100 == <cycle> { ... }` for time-based execution.
+- **Regular Block**: Processes all elements sequentially.
 
-The function maintains proper indentation and handles nested blocks correctly. It uses a visited set to avoid processing duplicate elements in the block. The function also handles `RecordValue` nodes by visiting their underlying value expressions.
+The function maintains proper indentation, avoids duplicate visits via an identity set, and gracefully handles `RecordValue` nodes by delegating to their underlying expression. When entering or leaving a conditional block the indentation is adjusted, ensuring the emitted Rust is formatted and ready for `cargo fmt`.
+
+#### `visit_external_module`
+
+```python
+def visit_external_module(self, node: ExternalSV):
+    """Emit a stub implementation for an external module."""
+```
+
+**Explanation:** Generates a minimal Rust function for external SystemVerilog modules. Because the real behaviour lives in dynamically loaded shared libraries, the stub simply marks that the module is driven externally (`// External module ...`) and returns `true` after silencing the unused `sim` parameter. This keeps the simulator buildable even when external modules have no Python-visible body.
 
 ## Generated Code Structure
 
@@ -140,12 +153,12 @@ pub extern "C" fn callback_of_<dram_name>(
 ```
 
 **Explanation:**
-- `req.type_id == 0`: Read response - sets `read_succ = true` and populates data
-- `req.type_id == 1`: Write response - sets `write_succ = true`
-- The callback updates the corresponding `sim.<dram>_response` fields
-- Refer to [ramulator2.md](../../../../tools/rust-sim-runtime/src/ramulator2.md) for Request details
+- `req.type_id == 0`: Read response - sets `read_succ = true`, populates the data buffer with placeholder bytes, and records that the response is a read.
+- `req.type_id == 1`: Write response - sets `write_succ = true` and marks the response as a write.
+- Both paths update `sim.request_stamp_map_table`, ensuring the simulator can translate DRAM responses back to the stamp that issued the request.
+- Refer to [ramulator2.md](../../../../tools/rust-sim-runtime/src/ramulator2.md) for `Request` details.
 
-This callback function is dumped in the same file as the DRAM module to minimize its visibility.
+This callback function is dumped in the same file as the DRAM module to minimize its visibility while keeping linkage straightforward.
 
 ### Module Function Structure
 
@@ -162,13 +175,15 @@ pub fn <module_name>(sim: &mut Simulator) -> bool {
 
 ### Expression Exposure
 
-When expressions are used by external modules, they are exposed in the simulator context:
+When expressions are used by other modules or external SV bindings, they are exposed in the simulator context:
 
 ```rust
-sim.<expr>_value = Some(value);
+let foo = { /* expression */ };
+sim.foo_value = Some(foo.clone());
+sim.external_handle.set_bar(ValueCastTo::<_>::cast(&foo));
 ```
 
-**Explanation:** This mechanism enables cross-module communication by making computed values available to other modules through the shared simulator context. The exposure is determined by the [expr_externally_used](../../analysis/external_usage.py) analysis.
+**Explanation:** This mechanism enables cross-module communication by making computed values available to other modules through the shared simulator context and, when necessary, by pushing the value into an external FFI handle. Exposure requirements are determined by the [expr_externally_used](../../analysis/external_usage.py) analysis and the `collect_external_value_assignments` helper.
 
 ### Debug Support
 

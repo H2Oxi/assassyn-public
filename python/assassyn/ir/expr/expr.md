@@ -30,13 +30,15 @@ The base class for all expression nodes in the IR. It serves as the foundation f
 - `is_unary()` - Check if the opcode is a unary operator  
 - `is_valued()` - Check if this operation has a return value
 
+Internally, the constructor normalizes operands through `_prepare_operand`. Direct references to `Array`, `Port`, or `Wire` objects are registered with the operand's `users` list. Expression operands must originate from the same module unless `_is_cross_module_allowed()` explicitly approves the reference. At present the only cross-module exception is a `WireRead` whose source belongs to an `ExternalSV` module, enabling external SystemVerilog outputs to be shared across multiple Assassyn modules without relaxing other invariants.
+
 #### `class Operand`
 
 A wrapper that creates a directed link between a value and the `Expr` that consumes it. This is the core mechanism for tracking dataflow dependencies.
 
 **Fields:**
 - `_value: Value` - The value of this operand
-- `_user: typing.Union[Expr, CondBlock]` - The user of this operand
+- `_user: typing.Union[Expr, CondBlock]` - The user of this operand (expressions are common, but guard expressions stored on `CondBlock` instances also reuse Operand)
 
 **Methods:**
 - `__init__(value: Value, user: Expr)` - Initialize the operand
@@ -137,6 +139,8 @@ Represents reading from an external wire.
 - `__init__(wire)` - Initialize wire read operation
 - `wire` - Return the wire being read (property)
 - `dtype` - The data type carried by the wire (property)
+
+`WireRead` nodes form the bridge between Python-defined modules and external SystemVerilog implementations. They are the only expression operands that may legally cross module boundaries during construction—`_is_cross_module_allowed()` grants an exception so consumers in other modules can observe external outputs.
 
 #### `class Log(Expr)`
 

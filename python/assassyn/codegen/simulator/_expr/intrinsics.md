@@ -34,7 +34,7 @@ Generates Rust code for pure intrinsic operations that inspect simulator state w
 - `str` - Generated Rust code string, or `None` if intrinsic is not supported
 
 **Explanation:**
-This function dispatches to the appropriate code generation function based on the intrinsic's opcode. Pure intrinsics are used for inspecting FIFO state, checking memory responses, and querying module activation status. The generated code accesses simulator state through the `sim` object without modifying it.
+This function dispatches to the appropriate code generation function based on the intrinsic's opcode. Pure intrinsics are used for inspecting FIFO state, checking memory responses, and querying module activation status. The generated code accesses simulator state through the `sim` object without modifying it; unsupported opcodes return `None` so the caller can fall back on default handling.
 
 ### `codegen_intrinsic`
 
@@ -54,7 +54,7 @@ Generates Rust code for side-effecting intrinsic operations that control executi
 - `str` - Generated Rust code string, or `None` if intrinsic is not supported
 
 **Explanation:**
-This function dispatches to the appropriate code generation function based on the intrinsic's opcode. Side-effecting intrinsics include execution control (`wait_until`, `finish`, `assert`), memory operations (`send_read_request`, `send_write_request`), and synchronization primitives (`barrier`). The generated code may modify simulator state or control execution flow.
+This function dispatches to the appropriate code generation function based on the intrinsic's opcode. Side-effecting intrinsics include execution control (`wait_until`, `finish`, `assert`), memory operations (`send_read_request`, `send_write_request`), and synchronization primitives (`barrier`). The generated code may modify simulator state or control execution flow. Handler functions receive the same `**kwargs` forwarded by the caller, allowing future extensions to thread additional context without changing the dispatch interface. If an opcode is not implemented the dispatcher returns `None`, signalling the caller to handle or report the unsupported intrinsic.
 
 ---
 

@@ -30,38 +30,32 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
 
 This function generates comprehensive port declarations for Verilog modules based on their role in the credit-based pipeline architecture. It performs the following steps:
 
-1. **Standard Ports**: Generates common ports for all modules:
-   - `clk = Clock()`: System clock
-   - `rst = Reset()`: System reset
-   - `executed = Output(Bits(1))`: Module execution status
-   - `cycle_count = Input(UInt(64))`: Global cycle counter
-   - `finish = Output(Bits(1))`: Module finish signal
+1. **Standard Ports**: Emits the common Assassyn ports (`clk`, `rst`, `executed`, `cycle_count`, `finish`).
 
 2. **Downstream Module Ports**: For downstream modules, generates:
-   - **Dependency Signals**: Input ports for each dependency module's execution status
-   - **External Value Ports**: Input ports for external values with valid signals
-   - **SRAM Interface**: Special memory interface ports for SRAM modules
+   - Dependency inputs for each upstream module recorded in `dumper.downstream_dependencies`.
+   - SRAM interface wires when the downstream is an SRAM wrapper (`mem_dataout`, `mem_address`, `mem_write_data`, `mem_write_enable`, `mem_read_enable`).
 
-3. **Pipeline Module Ports**: For regular pipeline modules, generates:
-   - **Trigger Counter Interface**: Input port for trigger counter validation
-   - **Port Interfaces**: Input ports for FIFO ports with valid signals and pop ready outputs
+3. **Pipeline Module Ports**: For regular pipeline modules (drivers or async callees), adds the trigger-counter backpressure input (`trigger_counter_pop_valid`).
 
-4. **FIFO Handshake Ports**: Generates handshake interfaces for:
-   - **Push Operations**: Input ready signals and output valid/data signals
-   - **Call Operations**: Input ready signals and output trigger signals
+4. **External Value Inputs**: Iterates over `node.externals`, building `<producer>_<value>` and `<producer>_<value>_valid` inputs for every exposed expression (excluding bindings and constants). Wire reads that originate from an `ExternalSV` producer are skipped because they are handled via dedicated external wiring.
 
-5. **Array Interface Ports**: Generates multi-port array interfaces:
-   - **Read Ports**: Input ports for array data
-   - **Write Ports**: Output ports for write enable, data, and address signals
+5. **FIFO Handshake Ports**:
+   - For pipeline modules, declares FIFO inputs (`port`, `port_valid`) and optional `port_pop_ready` outputs when the module pops from the FIFO.
+   - Adds ready inputs for FIFO pushes and trigger counter deltas, skipping handshake ports when the producer/consumer is a pure external stub.
 
-6. **Exposed Ports**: Adds any additional ports registered through the expose mechanism
+6. **Output Handshakes**: Declares `<callee>_<fifo>_push_valid/data` outputs and `<callee>_trigger` outputs for each async call target, again skipping external-only callees so we do not generate unused ports.
 
-The function handles different module types with specific logic:
+7. **Array Interfaces**: For every array listed in `dumper.array_users[node]`, creates inputs for the array value (`_q_in`) and, when the current module writes to the array, outputs for the per-port write enable/data/index signals. Port indices come from `dumper.array_write_port_mapping`.
 
-- **Downstream Modules**: Generate dependency and external value ports
-- **SRAM Modules**: Generate memory interface ports
-- **Driver Modules**: Generate trigger counter interfaces
-- **Regular Modules**: Generate FIFO port and trigger interfaces
+8. **Exposed Ports**: Appends any additional port declarations recorded in `dumper.exposed_ports_to_add` during expression traversal (e.g. `expose_*` and `valid_*` ports).
+
+The function accounts for several module categories:
+
+- **Downstream Modules**: Receive upstream execution flags and, if applicable, SRAM memory interfaces.
+- **Pipeline Modules**: Get trigger-counter pop-valid signals, FIFO inputs, and handshake ports.
+- **SRAM Modules**: Extend downstream behaviour with memory-specific ports.
+- **External Stubs**: Skipped from handshake port generation so we do not expose meaningless signals for modules implemented outside of Python.
 
 **Project-specific Knowledge Required**:
 - Understanding of [credit-based pipeline architecture](/docs/design/arch/arch.md)

@@ -114,8 +114,9 @@ The helper function to run the simulator.
 
 **Explanation:**
 This function executes the Rust-based simulator using cargo. It constructs the appropriate cargo command with 
-the provided manifest path and optional flags. The function prints the command being executed and returns the 
-captured output from the simulator.
+the provided manifest path and optional flags, prints the command being executed, and captures stdout. If the 
+initial invocation fails and `offline` was not explicitly requested, it retries automatically with `--offline` 
+to cover environments without network access.
 
 ### run_verilator
 
@@ -190,8 +191,9 @@ Returns the path to Verilator or None if VERILATOR_ROOT is not set.
 
 **Explanation:**
 This function checks if Verilator is available by verifying that the `VERILATOR_ROOT` environment variable exists 
-and points to a valid directory. It returns 'verilator' if available, which can be used as a command name, or 
-None if not available.
+and points to a valid directory, and by ensuring the `pycde` Python package is importable (a prerequisite for the
+code generation flow). Results are cached in `VERILATOR_CACHE`, and the function returns `'verilator'` on success 
+or `None` otherwise.
 
 ### create_and_clean_dir
 
@@ -242,6 +244,14 @@ PATH_CACHE = None
 ```
 
 Global variable that caches the repository path to avoid repeated environment variable lookups.
+
+### VERILATOR_CACHE
+
+```python
+VERILATOR_CACHE = None
+```
+
+Global variable that caches the result of `has_verilator()` to avoid repeating environment and dependency checks.
 
 ### _cmd_wrapper
 

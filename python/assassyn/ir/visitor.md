@@ -41,7 +41,7 @@ def visit_system(self, node: SysBuilder):
         self.visit_module(elem)
 ```
 
-**Explanation:** Entry point for visiting a complete system. Traverses the system in a specific order: first arrays, then modules (with `current_module` set), and finally downstreams (with `current_module` cleared). This ordering ensures that modules are processed with proper context while downstreams are processed without module context.
+**Explanation:** Entry point for visiting a complete system. Traverses the system in a specific order: first arrays, then modules (with `current_module` set), and finally downstreams (with `current_module` cleared). Resetting `current_module` between phases prevents downstream traversals (which often represent SRAM payloads or pure combinational blocks) from accidentally inheriting the previous module context.
 
 #### `visit_module(self, node: Module)`
 

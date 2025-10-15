@@ -1,6 +1,6 @@
 # Right-Hand Value Generation
 
-This module provides utilities for generating right-hand value (rvalue) references in Verilog code generation, handling the conversion of Assassyn IR nodes into appropriate Verilog signal names and expressions.
+This module provides utilities for generating right-hand value (rvalue) references in Verilog code generation, handling the conversion of Assassyn IR nodes into appropriate Verilog signal names and expressions, including the bookkeeping needed to interact with external SystemVerilog modules.
 
 ## Summary
 
@@ -30,10 +30,11 @@ def dump_rval(dumper, node, with_namespace: bool, module_name: str = None) -> st
 This is the main function for converting Assassyn IR nodes into Verilog signal references. It performs the following steps:
 
 1. **Operand Unwrapping**: Uses `unwrap_operand()` to handle wrapped operands and get the actual node
-2. **External Expression Handling**: Checks if the node is an external expression and generates appropriate port references
-3. **Type Dispatch**: Uses a dispatch table to route different node types to their specific dump functions
-4. **Expression Handling**: For expression nodes, generates unique names and handles namespace requirements
-5. **Fallback Handling**: Provides fallback mechanisms for subclasses not explicitly handled
+2. **External Wire Reads**: When encountering a `WireRead`, calls `register_external_wire_read` so the dumper can track producer/consumer wiring requirements before continuing.
+3. **External Expression Handling**: Checks if the node is an external expression and generates appropriate port references (`self.<producer>_<value>`).
+4. **Type Dispatch**: Uses a dispatch table to route different node types to their specific dump functions.
+5. **Expression Handling**: For expression nodes, generates unique names (using `expr_to_name`/`name_counters`) and handles namespace requirements.
+6. **Fallback Handling**: Provides fallback mechanisms for subclasses not explicitly handled.
 
 The function supports two modes:
 - **Without namespace**: Returns simple signal names (e.g., `"array_name"`)
@@ -122,3 +123,7 @@ The module uses a dispatch table `_RVAL_DUMP_DISPATCH` that maps node types to t
 - Understanding of [record value types](/python/assassyn/ir/dtype.md)
 
 The rvalue generation is a fundamental part of the Verilog code generation process, used extensively throughout the codebase for converting IR nodes into Verilog signal references.
+
+### External Wire Bookkeeping
+
+When `dump_rval` encounters a `WireRead`, it immediately calls `register_external_wire_read()` from the call-expression module. This side-effect records producer/consumer relationships for external SystemVerilog modules and ensures that the top-level harness can stitch the appropriate wires between modules before the design is compiled.

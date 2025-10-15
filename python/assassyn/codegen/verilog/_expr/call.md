@@ -1,6 +1,6 @@
 # Call Expression Generation
 
-This module provides Verilog code generation for call operations, including async calls, wire assignments, and wire reads, with special handling for external SystemVerilog modules.
+This module provides Verilog code generation for call operations, including async calls, wire assignments, and wire reads, with special handling for external SystemVerilog modules and the bookkeeping needed to wire their ports into the generated PyCDE design.
 
 ## Summary
 
@@ -74,16 +74,11 @@ def codegen_wire_assign(dumper, expr: WireAssign) -> Optional[str]:
 
 This function handles wire assignment operations, with special handling for external SystemVerilog modules. It performs the following steps:
 
-1. **External Module Detection**: Checks if the wire assignment is to an external SystemVerilog module
-2. **Input Registration**: For external modules, registers the wire assignment as a pending external input
-3. **Comment Generation**: Returns a comment documenting the external wire assignment
+1. **External Module Detection**: Checks if the wire assignment targets a port exposed by an `ExternalSV` module.
+2. **Input Registration**: For external modules, records the `<wire_name, value>` pair inside `dumper.pending_external_inputs[owner]`. These queued inputs are consumed when the external instance is emitted so all connections are applied in one place.
+3. **Comment Generation**: Returns a comment documenting the assignment, which helps the generator track where external connections originated.
 
-The function handles external modules by:
-- Identifying wires that belong to `ExternalSV` modules
-- Storing wire assignments in `dumper.pending_external_inputs` for later processing
-- Ensuring proper instantiation order for external modules
-
-This approach allows external SystemVerilog modules to be properly instantiated with their required input connections.
+Non-external wire assignments simply leave a breadcrumb comment, while external assignments queue up the data so `codegen_wire_read` can wire the signals when the external module is instantiated.
 
 **Project-specific Knowledge Required**:
 - Understanding of [wire assignment operations](/python/assassyn/ir/expr/call.md)
@@ -101,21 +96,12 @@ def codegen_wire_read(dumper, expr: WireRead) -> Optional[str]:
 
 This function generates Verilog code for wire read operations, with comprehensive handling for external SystemVerilog modules. It performs the following steps:
 
-1. **Comment Generation**: Adds a comment documenting the external wire read
-2. **External Module Instantiation**: Handles instantiation of external SystemVerilog modules
-3. **Wire Access**: Generates code to read from the external module's output
+1. **Comment Generation**: Emits a `# External wire read` comment to keep the generated script traceable.
+2. **External Registration**: Delegates to `register_external_wire_read` so the dumper can record provenance. That helper determines whether the read happens within the producer module or remotely, and tracks the wiring needed to move the value across module boundaries.
+3. **External Module Instantiation**: If the current module is the external producer, ensures the external wrapper is instantiated exactly once. Pending inputs queued by `codegen_wire_assign` are connected at instantiation time, along with optional clock/reset ports.
+4. **Wire Access**: Returns the appropriate assignment or expression depending on whether the read is local, remote, or unresolved. When reading across modules the helper generates `self.<port_name>` loads; when reading inside the producer it references the instantiated external wrapper (`<ext>_ffi_inst.<wire_name>`).
 
-The function handles external modules by:
-- **Module Instantiation**: Creates instances of external modules with proper connections
-- **Clock/Reset Handling**: Automatically connects clock and reset signals if required
-- **Input Connection**: Connects all pending external inputs to the module instance
-- **Output Access**: Generates code to read from the module's output wires
-
-The instantiation process includes:
-- Clock connection (`clk=self.clk`) if the module has a clock
-- Reset connection (`rst=self.rst`) if the module has a reset
-- Input connections from pending external inputs
-- Proper instance naming and module reference
+If the requested external output is already mapped to a local simulator field, the function suppresses redundant assignments to avoid generating self-assignments.
 
 **Project-specific Knowledge Required**:
 - Understanding of [wire read operations](/python/assassyn/ir/expr/call.md)
@@ -125,15 +111,28 @@ The instantiation process includes:
 
 ## Internal Helpers
 
-The module uses several utility functions:
+### `register_external_wire_read`
+
+```python
+def register_external_wire_read(dumper, expr: WireRead):
+    """Register bookkeeping for external wire reads without emitting code."""
+```
+
+**Explanation**
+
+This helper records the relationships uncovered during an external wire read:
+
+- Registers the expression with `dumper.expose('expr', expr)` so the producer can expose the value if needed.
+- When the read occurs in a different module, records the consumer/producer pair plus wiring metadata (`external_wire_assignments`). The top-level harness later consumes this list to insert cross-module wires and assignments.
+- When the read happens inside the external producer, notes the output name in `dumper.external_wire_outputs` so downstream consumers know which expose port to bind.
+
+By keeping bookkeeping separate from code emission, the generator can assemble external wiring once during the cleanup stages, ensuring consistent connections across downstream modules and the top-level harness.
+
+---
+
+The module also relies on:
 
 - `dump_rval()` from [rval module](/python/assassyn/codegen/verilog/rval.md) for generating signal references
 - `namify()` from [utils module](/python/assassyn/utils.md) for name generation
 
 The call expression generation is integrated into the main expression dispatch system through the [__init__.py](/python/assassyn/codegen/verilog/_expr/__init__.md) module, which routes different expression types to their appropriate code generation functions.
-
-**Project-specific Knowledge Required**:
-- Understanding of [expression dispatch system](/python/assassyn/codegen/verilog/_expr/__init__.md)
-- Knowledge of [CIRCTDumper integration](/python/assassyn/codegen/verilog/design.md)
-- Reference to [call expression types](/python/assassyn/ir/expr/call.md)
-- Understanding of [external module integration](/python/assassyn/ir/module/external.md)

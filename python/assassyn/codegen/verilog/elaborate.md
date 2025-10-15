@@ -1,10 +1,10 @@
 # Verilog Elaboration
 
-This module provides the main elaboration function for Verilog code generation, orchestrating the complete process of converting Assassyn IR into synthesizable Verilog code with testbenches, external module integration, and resource file management.
+This module provides the main elaboration function for Verilog code generation, orchestrating the complete process of converting Assassyn IR into synthesizable Verilog code with testbenches, external module integration, SRAM blackbox emission, and resource file management.
 
 ## Summary
 
-The Verilog elaboration module is the main entry point for Verilog code generation, coordinating the complete process of converting an Assassyn system into synthesizable Verilog code. It handles design generation, testbench creation, external module integration, resource file management, and SRAM blackbox generation.
+The Verilog elaboration module is the main entry point for Verilog code generation, coordinating the complete process of converting an Assassyn system into synthesizable Verilog code. It handles design generation, testbench creation, external module integration, SRAM blackbox generation, alias resource synthesis, and general resource file management.
 
 ## Exposed Interfaces
 
@@ -34,20 +34,20 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
 
 This function is the main entry point for Verilog code generation, orchestrating the complete elaboration process. It performs the following comprehensive steps:
 
-1. **Directory Setup**: Creates and cleans the output directory structure
-2. **External Module Analysis**: Identifies external SystemVerilog modules and their source files
-3. **Design Generation**: Calls `generate_design()` to create the main Verilog design
-4. **Testbench Generation**: Calls `generate_testbench()` to create the simulation testbench
-5. **Resource File Management**: Copies and manages all necessary resource files
-6. **SRAM Blackbox Generation**: Creates SRAM memory blackbox modules
-7. **External File Integration**: Copies external SystemVerilog files to the output directory
+1. **Directory Setup**: Resolves the output directory (default `<cwd>/verilog`), ensures it exists, and optionally wipes prior results when `override_dump` is set.
+2. **External Module Analysis**: Collects the source files referenced by `ExternalSV` modules so they can be copied alongside the generated design.
+3. **Design Generation**: Calls `generate_design()` to build `design.py` and capture log metadata for the testbench.
+4. **Alias Discovery**: If a previous `Top.sv` exists, scans it for parameterised module aliases (e.g. `fifo_1`) so matching resource files can be cloned.
+5. **Testbench Generation**: Calls `generate_testbench()` with the discovered alias list and external file names, ensuring the Cocotb harness imports every required HDL artifact.
+6. **SRAM Blackbox Generation**: Invokes `generate_sram_blackbox_files()` so each SRAM downstream module receives a behavioural blackbox wrapper.
+7. **Resource File Management**: Copies core support files (`fifo.sv`, `trigger_counter.sv`), materialises alias copies when required, and copies user-supplied SystemVerilog sources (resolving relative paths via `repo_path()`).
 
 The function handles complex file management:
 
-- **Resource File Copying**: Copies FIFO and trigger counter templates
-- **Alias File Creation**: Creates aliased versions of parameterized modules
-- **External File Integration**: Copies external SystemVerilog modules
-- **SRAM Blackbox Generation**: Creates memory blackbox modules with initialization
+- **Resource File Copying**: Copies FIFO and trigger counter templates into the output directory.
+- **Alias File Creation**: Clones template resources under alias names when CIRCT produces suffixed module instances.
+- **External File Integration**: Copies external SystemVerilog modules (absolute or repository-relative) into the output tree.
+- **SRAM Blackbox Generation**: Emits behavioural SRAM wrappers with optional `readmemh` initialisation.
 
 **Project-specific Knowledge Required**:
 - Understanding of [system builder](/python/assassyn/builder.md)
@@ -67,23 +67,13 @@ def generate_sram_blackbox_files(sys, path, resource_base=None):
 
 This function generates separate Verilog files for SRAM memory blackbox modules. It performs the following steps:
 
-1. **SRAM Analysis**: Identifies all SRAM modules in the system
-2. **Parameter Extraction**: Extracts SRAM parameters (data width, address width, array name)
-3. **Verilog Generation**: Creates SystemVerilog blackbox modules with:
-   - Parameterized data and address widths
-   - Clock and reset interfaces
-   - Read/write control signals
-   - Memory array declaration
-   - Initialization support (if init_file is specified)
-   - Read/write logic implementation
+1. **SRAM Analysis**: Identifies all SRAM downstream modules in the system and obtains their payload metadata via `extract_sram_params`.
+2. **Template Emission**: Writes a SystemVerilog module per SRAM that declares the memory, clock/reset, address/data ports, and banksel/read/write controls.
+3. **Initialisation Support**: When the SRAM metadata specifies an `init_file`, emits an `initial begin $readmemh(...); end` block using either the provided `resource_base` directory or the raw path.
+4. **Reset Behaviour**: For SRAMs without an init file, generates reset logic that clears the memory contents when `rst_n` is asserted low.
+5. **Read/Write Logic**: Implements simple synchronous write behaviour guarded by `write & banksel` and combinational readback when `read & banksel` is asserted.
 
-The generated SRAM blackbox modules include:
-
-- **Parameterized Interface**: Configurable data and address widths
-- **Memory Array**: Register-based memory with configurable depth
-- **Initialization Support**: Optional memory initialization from files
-- **Read/Write Logic**: Proper read/write control with bank selection
-- **Reset Logic**: Memory initialization on reset (if no init file)
+The generated wrappers provide a behavioural memory model suitable for simulation while keeping the interface parameterised so integrators can replace them with technology-specific implementations if required.
 
 **Project-specific Knowledge Required**:
 - Understanding of [SRAM memory model](/python/assassyn/ir/memory/sram.md)
