@@ -22,44 +22,33 @@ def external_handle_field(module_name: str) -> str:
     return f"{namify(module_name)}_ffi"
 
 
-class _ModuleExprWalker(Visitor):
-    """Visitor helper that walks module expressions depth-first."""
-
-    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - interface hook
-        """Hook invoked for each visited expression."""
-
-    def visit_expr(self, node: Expr):  # pylint: disable=arguments-differ
-        self.handle_expr(node)
-        for operand in getattr(node, "operands", []):
-            value = unwrap_operand(operand)
-            if isinstance(value, Expr):
-                self.visit_expr(value)
+def _get_wire_owner(wire):
+    """Return the owner module of a wire (parent or module attribute)."""
+    return getattr(wire, "parent", None) or getattr(wire, "module", None)
 
 
-class _ExternalWireReadCollector(_ModuleExprWalker):
+class _ExternalWireReadCollector(Visitor):
     """Collect ``WireRead`` expressions that observe ExternalSV outputs."""
 
     def __init__(self):
         super().__init__()
         self.reads: Set[Expr] = set()
 
-    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - simple predicate
-        if not isinstance(expr, WireRead):
-            return
-        wire = expr.wire
-        owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-        if isinstance(owner, ExternalSV):
-            self.reads.add(expr)
+    def visit_expr(self, expr: Expr) -> None:
+        if isinstance(expr, WireRead):
+            owner = _get_wire_owner(expr.wire)
+            if isinstance(owner, ExternalSV):
+                self.reads.add(expr)
 
 
-class _ModuleValueExposureCollector(_ModuleExprWalker):
+class _ModuleValueExposureCollector(Visitor):
     """Collect expressions that need simulator-side caching."""
 
     def __init__(self):
         super().__init__()
         self.exprs: Set[Expr] = set()
 
-    def handle_expr(self, expr: Expr) -> None:  # pragma: no cover - simple predicate
+    def visit_expr(self, expr: Expr) -> None:
         if expr_externally_used(expr, True):
             self.exprs.add(expr)
 
@@ -68,10 +57,19 @@ def _assignment_handled_by_producer(
     value_expr: object,
     external_value_assignments: Dict[tuple, List[Tuple[ExternalSV, Wire]]],
 ) -> bool:
-    """Return True if the producer module already emits assignments for this value."""
-    if not isinstance(value_expr, Expr):
+    """Return True if the producer module already emits assignments for this value.
+
+    This function accepts either an Expr or an Operand wrapping an Expr.
+    Operand's __getattr__ allows direct attribute access without explicit unwrapping.
+    """
+    # Check if it's an Expr (directly or wrapped in Operand)
+    # For Operand, isinstance check fails but __getattr__ forwards to wrapped value
+    actual_expr = unwrap_operand(value_expr)
+    if not isinstance(actual_expr, Expr):
         return False
-    parent_block = getattr(value_expr, "parent", None)
+
+    # Use value_expr directly - Operand.__getattr__ forwards attribute access
+    parent_block = value_expr.parent
     producer_module = getattr(parent_block, "module", None)
     if producer_module is None:
         return False
@@ -162,13 +160,13 @@ def codegen_external_wire_assign(
     """Produce simulator code for driving an ExternalSV input wire."""
 
     wire = node.wire
-    owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+    owner = _get_wire_owner(wire)
     wire_name = getattr(wire, "name", None)
     if not isinstance(owner, ExternalSV) or not wire_name:
         return None
 
-    value_expr = unwrap_operand(node.value)
-    if _assignment_handled_by_producer(value_expr, external_value_assignments):
+    # Pass node.value directly - _assignment_handled_by_producer handles Operand unwrapping
+    if _assignment_handled_by_producer(node.value, external_value_assignments):
         # Assignment handled in producer module to preserve evaluation ordering.
         return ""
 
@@ -196,7 +194,7 @@ def codegen_external_wire_read(
     """Produce simulator code for reading an ExternalSV output wire."""
 
     wire = node.wire
-    owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
+    owner = _get_wire_owner(wire)
     wire_name = getattr(wire, "name", None)
     if not isinstance(owner, ExternalSV) or not wire_name:
         return None

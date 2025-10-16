@@ -45,9 +45,23 @@ Unwrap the operand from the node. This is a helper function to get the operand f
 - The unwrapped value if `node` is an `Operand`, otherwise returns `node` unchanged
 
 **Explanation:**
-This function extracts the actual value from an `Operand` wrapper in the IR system. If the input is an `Operand` 
-instance, it returns the wrapped value; otherwise, it returns the input unchanged. This is used extensively in 
-code generation to access the underlying values from IR nodes.
+This function extracts the actual value from an `Operand` wrapper in the IR system. If the input is an `Operand`
+instance, it returns the wrapped value; otherwise, it returns the input unchanged.
+
+**Important Note on Usage:**
+Due to `Operand.__getattr__` forwarding attribute access to the wrapped value, explicit unwrapping is often
+unnecessary when accessing attributes or calling methods. For example:
+- `operand.parent` automatically forwards to `operand.value.parent`
+- `operand.as_operand()` automatically forwards to `operand.value.as_operand()`
+
+However, unwrapping is still required for:
+1. **Type checking**: `isinstance(node, SpecificClass)` checks the Operand type, not the wrapped value
+2. **APIs requiring specific types**: Some functions expect specific types and don't accept Operand wrappers
+
+**Best Practice:**
+- When only accessing attributes/methods: rely on `__getattr__` forwarding (no unwrap needed)
+- When type checking is required: use `unwrap_operand()` first
+- When passing to external APIs: check if the API accepts Operand or requires unwrapping
 
 ### repo_path
 
