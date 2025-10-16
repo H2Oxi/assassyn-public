@@ -62,7 +62,7 @@ Translate the `ExternalSV.wires` dictionary into `FFIPort` instances. Widths mus
 ### `_generate_cargo_toml`, `_generate_lib_rs`, `_generate_wrapper_cpp`
 
 Emit templated sources for the crate:
-  * `Cargo.toml` defines a minimal `libloading` dependency.
+  * `Cargo.toml` depends on the shared `sim_runtime` crate (which re-exports `libloading`).
   * `src/lib.rs` produces a safe Rust wrapper with dynamic symbol loading, optional clock/reset helpers, and per-port setters/getters.
   * `src/wrapper.cpp` wraps the verilated model with a stable C ABI.
 
