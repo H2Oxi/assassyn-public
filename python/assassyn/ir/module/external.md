@@ -46,16 +46,22 @@ result = ip.y  # or ip.y[0] for RegOut
 ## Directional Wire Views
 
   * `DirectionalWires` exposes a dict-like API for inputs and outputs (`module.in_wires`, `module.out_wires`).
-  * Reads defer to `_ensure_output_exposed`, which enters a builder context when necessary to create a `wire_read` expression; registered outputs return an `_ExternalRegOutProxy` that enforces index `0`.
+  * Reads defer to `_ensure_output_exposed`, which uses the internal `_with_module_context()` helper to create a `wire_read` expression; registered outputs return an `_ExternalRegOutProxy` that enforces index `0`.
   * Writes dispatch to `wire_assign` and update the underlying `Wire` so that subsequent IR traversal sees the same connection. Assignments can happen through `module.in_wires[...]`, direct attribute access, bracket syntax (`module['a'] = ...`), or the convenience wrapper `in_assign(...)`.
+  * **Performance optimization**: `DirectionalWires.__getitem__` checks `_connections_applied` flag before calling `_apply_pending_connections()`, avoiding redundant operations on subsequent accesses.
 
 -----
 
 ## ExternalSV Class
 
-  * **Construction**: resolves decorator supplied defaults, requires a `file_path`, and records `external_module_name`, `has_clock`, `has_reset`, along with module attributes like `Module.ATTR_EXTERNAL`.
+  * **Construction**: resolves decorator supplied defaults, requires a `file_path`, and records `external_module_name`, `has_clock`, `has_reset`, along with module attributes like `Module.ATTR_EXTERNAL`. Initializes performance flags `_connections_applied` and `_reads_harvested` to track state.
   * **Wire Registration**: instantiates real `Wire` objects for every declared input/output, storing them in `self._wires`. Optional keyword arguments passed to the constructor are validated and queued until a builder context is available (`_apply_pending_connections`).
-  * **IR Integration**: `in_assign()` pushes the builder onto the module body, drives any provided inputs, and returns the declared outputs in order (single object or tuple). Output reads are memoized per wire to keep the generated IR minimal.
+  * **Context Management**: `_with_module_context()` provides a unified context manager for entering module/block context, eliminating code duplication and reducing invasiveness. It intelligently checks if context entry is needed and handles cleanup automatically.
+  * **IR Integration**: `in_assign()` uses `_with_module_context()` to safely drive inputs and return outputs. The method is significantly simplified (18 lines vs 35) while maintaining identical functionality. Output reads are memoized per wire to keep the generated IR minimal.
+  * **Performance Optimizations**:
+    - `_apply_pending_connections()` is idempotent via `_connections_applied` flag
+    - `_harvest_output_reads()` executes only once via `_reads_harvested` flag
+    - Both flags prevent redundant traversals and operations
   * **Indexing Helpers**: `__getitem__` and `__setitem__` forward to the directional adapters, letting users treat the module like a small associative array of ports.
   * **String Dump**: `__repr__` renders the external metadata, attached attributes, and the module body so debug dumps clearly mark external instantiations.
 
