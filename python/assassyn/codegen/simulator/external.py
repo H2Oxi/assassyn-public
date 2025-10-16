@@ -34,11 +34,11 @@ class _ExternalWireReadCollector(Visitor):
         super().__init__()
         self.reads: Set[Expr] = set()
 
-    def visit_expr(self, expr: Expr) -> None:
-        if isinstance(expr, WireRead):
-            owner = _get_wire_owner(expr.wire)
+    def visit_expr(self, node: Expr) -> None:
+        if isinstance(node, WireRead):
+            owner = _get_wire_owner(node.wire)
             if isinstance(owner, ExternalSV):
-                self.reads.add(expr)
+                self.reads.add(node)
 
 
 class _ModuleValueExposureCollector(Visitor):
@@ -48,9 +48,9 @@ class _ModuleValueExposureCollector(Visitor):
         super().__init__()
         self.exprs: Set[Expr] = set()
 
-    def visit_expr(self, expr: Expr) -> None:
-        if expr_externally_used(expr, True):
-            self.exprs.add(expr)
+    def visit_expr(self, node: Expr) -> None:
+        if expr_externally_used(node, True):
+            self.exprs.add(node)
 
 
 def _assignment_handled_by_producer(
