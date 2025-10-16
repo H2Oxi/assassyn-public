@@ -209,7 +209,9 @@ class DirectionalWires:
         return iter(self.keys())
 
     def __getitem__(self, key):
-        self._module._apply_pending_connections()
+        # Apply pending connections on first access (idempotent due to flag)
+        if not self._module._connections_applied:
+            self._module._apply_pending_connections()
         wire = self._get_wire(key)
         if self._direction == 'output':
             expr = self._module.ensure_output_exposed(wire)
@@ -306,6 +308,8 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
 
         self._wires = {}
         self._exposed_output_reads = {}
+        self._connections_applied = False  # Flag to track if pending connections are applied
+        self._reads_harvested = False  # Flag to track if output reads have been harvested
 
         decl_in_wires = in_wires or {}
         decl_out_wires = out_wires or {}
@@ -356,15 +360,65 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
             if validated:
                 self._pending_wire_connections = validated
 
+    def _ensure_body(self):
+        '''Ensure the module body block exists.'''
+        if self.body is None:
+            self.body = Block(Block.MODULE_ROOT)
+            self.body.parent = self
+            self.body.module = self
+
+    def _with_module_context(self, force_enter=False):
+        '''Context manager for entering the module and body context.
+
+        Args:
+            force_enter: If True, always enter context. If False, only enter if not already in context.
+
+        Yields:
+            True if context was entered, False otherwise.
+        '''
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _context():
+            builder = Singleton.builder
+            if builder is None:
+                raise RuntimeError(
+                    "ExternalSV context operations require an active SysBuilder context"
+                )
+
+            self._ensure_body()
+
+            # Check if we need to enter context
+            need_context = force_enter or (
+                builder.current_module is not self
+                or builder.current_block is None
+                or getattr(builder.current_block, 'module', None) is not self
+            )
+
+            if need_context:
+                builder.enter_context_of('module', self)
+                builder.enter_context_of('block', self.body)
+
+            try:
+                yield need_context
+            finally:
+                if need_context:
+                    builder.exit_context_of('block')
+                    builder.exit_context_of('module')
+
+        return _context()
+
     def _apply_pending_connections(self):
         '''Apply any deferred constructor assignments when context is available.'''
-        if not self._pending_wire_connections:
+        # Early return if already applied or nothing to apply
+        if self._connections_applied or not self._pending_wire_connections:
             return
         builder = Singleton.builder
         if builder is None or builder.current_module is None or builder.current_block is None:
             return
         assignments = self._pending_wire_connections
         self._pending_wire_connections = None
+        self._connections_applied = True  # Mark as applied
         for wire_name, value in assignments.items():
             wire_obj = self._wires[wire_name]
             wire_assign(wire_obj, value)
@@ -379,45 +433,22 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
         if wire in self._exposed_output_reads:
             return self._exposed_output_reads[wire]
 
-        builder = Singleton.builder
-        if builder is None:
-            raise RuntimeError(
-                "External wire access requires an active SysBuilder context"
-            )
-
-        need_context = (
-            builder.current_module is not self
-            or builder.current_block is None
-            or getattr(builder.current_block, 'module', None) is not self
-        )
-
-        if self.body is None:
-            self.body = Block(Block.MODULE_ROOT)
-            self.body.parent = self
-            self.body.module = self
-
-        if need_context:
-            builder.enter_context_of('module', self)
-            builder.enter_context_of('block', self.body)
-
-        try:
+        with self._with_module_context():
             expr = wire_read(wire)
-        finally:
-            if need_context:
-                builder.exit_context_of('block')
-                builder.exit_context_of('module')
 
         self._exposed_output_reads[wire] = expr
         return expr
 
     def _harvest_output_reads(self):
         '''Populate cached output WireRead expressions using the visitor walker.'''
-        if not self._declared_out_wires or self.body is None:
+        # Early return if already harvested or nothing to harvest
+        if self._reads_harvested or not self._declared_out_wires or self.body is None:
             return
         collector = _ExternalWireReadCollector(self)
         collector.visit_block(self.body)
         for wire, expr in collector.reads.items():
             self._exposed_output_reads.setdefault(wire, expr)
+        self._reads_harvested = True  # Mark as harvested
 
     def ensure_output_exposed(self, wire: Wire):
         '''Public wrapper for exposing output wires as expressions.'''
@@ -454,30 +485,13 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
         Args:
             **kwargs: Wire name to value mappings (e.g., a=value, b=value)
         '''
-        builder = Singleton.builder
-        if builder is None:
-            raise RuntimeError(
-                "ExternalSV.in_assign requires an active SysBuilder context"
-            )
-
         self._apply_pending_connections()
 
-        if self.body is None:
-            self.body = Block(Block.MODULE_ROOT)
-            self.body.parent = self
-            self.body.module = self
-
-        builder.enter_context_of('module', self)
-        builder.enter_context_of('block', self.body)
-
-        try:
+        with self._with_module_context(force_enter=True):
             for wire_name, value in kwargs.items():
                 self.in_wires[wire_name] = value
 
             outputs = [self.out_wires[name] for name in self.out_wires]
-        finally:
-            builder.exit_context_of('block')
-            builder.exit_context_of('module')
 
         if not outputs:
             return None
@@ -487,23 +501,29 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
 
     def __repr__(self):
         '''String representation of the external module.'''
+        # Build external-specific header information
+        ext_info = f'  // External file: {self.file_path}\n'
+        ext_info += f'  // External module name: {self.external_module_name}\n'
+
+        # Build wire information similar to ports
         wires = '\n    '.join(
             f"{name}: {wire}" for name, wire in self._wires.items()
         )
         wire_lines = f'{{\n    {wires}\n  }} ' if wires else ''
+
+        # Build attributes string
         attrs = ', '.join(
             f'{Module.MODULE_ATTR_STR[i]}: {j}' for i, j in self._attrs.items()
         )
-        attrs = f'#[{attrs}] ' if attrs else ''
+        attrs_str = f'#[{attrs}] ' if attrs else ''
+
+        # Use similar structure to parent's _repr_impl
         var_id = self.as_operand()
-
-        ext_info = f'  // External file: {self.file_path}\n'
-        ext_info += f'  // External module name: {self.external_module_name}\n'
-
         Singleton.repr_ident = 2
         body = self.body.__repr__() if self.body else ''
         ext = self._dump_externals()
-        return f'''{ext}{ext_info}  {attrs}
+
+        return f'''{ext}{ext_info}  {attrs_str}
   {var_id} = external_module {self.name} {wire_lines}{{
 {body}
   }}'''
