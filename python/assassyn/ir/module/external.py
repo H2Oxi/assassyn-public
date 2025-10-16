@@ -371,12 +371,13 @@ class ExternalSV(Downstream):  # pylint: disable=too-many-instance-attributes
         '''Context manager for entering the module and body context.
 
         Args:
-            force_enter: If True, always enter context. If False, only enter if not already in context.
+            force_enter: If True, always enter context. If False, only enter
+                if not already in context.
 
         Yields:
             True if context was entered, False otherwise.
         '''
-        from contextlib import contextmanager
+        from contextlib import contextmanager  # pylint: disable=import-outside-toplevel
 
         @contextmanager
         def _context():
