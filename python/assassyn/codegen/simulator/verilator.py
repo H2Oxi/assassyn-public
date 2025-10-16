@@ -378,12 +378,15 @@ def _spec_manifest_entry(spec: ExternalFFIModule, simulator_root: Path) -> Dict[
 
 
 def _generate_cargo_toml(crate: ExternalFFIModule) -> str:
+    runtime_dir = Path(repo_path()) / "tools" / "rust-sim-runtime"
+    runtime_rel = os.path.relpath(runtime_dir, crate.crate_path)
+    runtime_rel = runtime_rel.replace(os.sep, "/")
     return f"""[package]
 name = "{crate.crate_name}"
 version = "0.1.0"
 edition = "2021"
 [dependencies]
-libloading = "0.8"
+sim-runtime = {{ path = "{runtime_rel}" }}
 """
 
 
@@ -396,7 +399,7 @@ def _generate_lib_rs(crate: ExternalFFIModule) -> str:  # pylint: disable=too-ma
 
     lines = [
         "#![allow(dead_code)]",
-        "use libloading::Library;",
+        "use sim_runtime::libloading::Library;",
         "use std::path::{Path, PathBuf};",
         "use std::ptr::NonNull;",
         "",

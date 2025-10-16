@@ -51,7 +51,7 @@ def dump_modules(sys: SysBuilder, modules_dir: Path) -> bool:
 
 Generates individual module files in the modules/ directory for simulator code generation.
 
-This function prepares `modules/mod.rs` (with the imports required by generated code, including `libloading`, `VecDeque`, and `sim_runtime` utilities), gathers external FFI specifications attached to the system, and then iterates over every module/downstream to create `<module>.rs` implementations.
+This function prepares `modules/mod.rs` (with the imports required by generated code, including `sim_runtime` and its `libloading` re-exports alongside `VecDeque` utilities), gathers external FFI specifications attached to the system, and then iterates over every module/downstream to create `<module>.rs` implementations.
 
 **Parameters:**
 - `sys`: The system builder containing all modules to be generated
