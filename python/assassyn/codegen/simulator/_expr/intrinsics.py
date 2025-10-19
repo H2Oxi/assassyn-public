@@ -6,7 +6,7 @@ This module contains helper functions to generate simulator code for intrinsic o
 # pylint: disable=too-many-locals, unused-argument
 # pylint: disable=import-outside-toplevel
 
-from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic
+from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic, ExternalIntrinsic
 from ....utils import namify
 from ..node_dumper import dump_rval_ref
 
@@ -52,6 +52,27 @@ def _codegen_get_mem_resp(node, module_ctx):
     return f"BigUint::from_bytes_le(&sim.{dram_name}_response.data)"
 
 
+def _codegen_external_output_read(node, module_ctx, sys, **_kwargs):
+    """Generate code for EXTERNAL_OUTPUT_READ intrinsic.
+
+    This handles both WireOut (no index) and RegOut (with index) reads.
+    Type information (wire vs reg) is available from the ExternalIntrinsic instance.
+    """
+    instance = node.args[0]  # ExternalIntrinsic
+    port_name = node.args[1].value if hasattr(node.args[1], 'value') else node.args[1]
+
+    # Optional: index parameter for RegOut (currently unused in codegen)
+    # index = node.args[2] if len(node.args) > 2 else None
+
+    # Type info can be queried if needed in future:
+    # wire_spec = instance.external_class._wires[port_name]
+    # is_reg = (wire_spec.kind == 'reg')
+
+    instance_uid = instance.uid
+    handle_name = f"external_{instance_uid}"
+    return f"sim.{handle_name}.{port_name}.clone()"
+
+
 # Dispatch table for pure intrinsic operations
 _PURE_INTRINSIC_DISPATCH = {
     PureIntrinsic.FIFO_PEEK: _codegen_fifo_peek,
@@ -60,6 +81,7 @@ _PURE_INTRINSIC_DISPATCH = {
     PureIntrinsic.MODULE_TRIGGERED: _codegen_module_triggered,
     PureIntrinsic.HAS_MEM_RESP: _codegen_has_mem_resp,
     PureIntrinsic.GET_MEM_RESP: _codegen_get_mem_resp,
+    PureIntrinsic.EXTERNAL_OUTPUT_READ: _codegen_external_output_read,
 }
 
 
@@ -149,6 +171,29 @@ def _codegen_send_write_request(node, module_ctx):
                     }}"""
 
 
+def _codegen_external_instantiate(node, module_ctx, sys, **_kwargs):
+    """Generate code for EXTERNAL_INSTANTIATE intrinsic.
+
+    This handles the instantiation of external module instances.
+    The actual FFI struct fields are added elsewhere during simulator generation.
+    """
+    # For ExternalIntrinsic, we need to assign input values and call eval()
+    instance_uid = node.uid
+    handle_name = f"external_{instance_uid}"
+
+    assignments = []
+    for port_name, value in node.input_connections.items():
+        value_code = dump_rval_ref(module_ctx, sys, value)
+        assignments.append(f"sim.{handle_name}.{port_name} = {value_code};")
+
+    # Call eval() to compute outputs from inputs
+    assignments.append(f"sim.{handle_name}.eval();")
+
+    if assignments:
+        return "\n".join(assignments)
+    return "/* External module instantiated */"
+
+
 # Dispatch table for intrinsic operations
 _INTRINSIC_DISPATCH = {
     Intrinsic.WAIT_UNTIL: _codegen_wait_until,
@@ -157,11 +202,16 @@ _INTRINSIC_DISPATCH = {
     Intrinsic.BARRIER: _codegen_barrier,
     Intrinsic.SEND_READ_REQUEST: _codegen_send_read_request,
     Intrinsic.SEND_WRITE_REQUEST: _codegen_send_write_request,
+    Intrinsic.EXTERNAL_INSTANTIATE: _codegen_external_instantiate,
 }
 
 
 def codegen_intrinsic(node: Intrinsic, module_ctx):
     """Generate code for intrinsic operations."""
+    # Handle ExternalIntrinsic specially
+    if isinstance(node, ExternalIntrinsic):
+        return _codegen_external_instantiate(node, module_ctx, sys, **kwargs)
+
     intrinsic = node.opcode
     codegen_func = _INTRINSIC_DISPATCH.get(intrinsic)
     if codegen_func is not None:

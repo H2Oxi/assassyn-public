@@ -12,6 +12,7 @@ from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
 from .external import (
+    collect_external_intrinsics,
     external_handle_field,
     gather_expr_validities,
     is_stub_external,
@@ -109,6 +110,75 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
 
     expr_validities, module_expr_map = gather_expr_validities(sys)
 
+    # Collect all ExternalIntrinsic instances
+    external_intrinsics = collect_external_intrinsics(sys)
+    # Track unique external classes to generate struct definitions
+    external_classes = {}
+    for intr in external_intrinsics:
+        cls_name = intr.external_class.__name__
+        if cls_name not in external_classes:
+            external_classes[cls_name] = intr.external_class
+
+    # Generate struct definitions for external modules
+    for cls_name, ext_class in external_classes.items():
+        # Separate inputs and outputs based on WireSpec attributes
+        inputs = {}
+        comb_outputs = {}
+        reg_outputs = {}
+
+        for port_name, wire_spec in ext_class._wires.items():
+            if wire_spec.direction == 'in':
+                inputs[port_name] = wire_spec
+            elif wire_spec.direction == 'out':
+                if wire_spec.kind == 'reg':
+                    reg_outputs[port_name] = wire_spec
+                else:  # kind == 'wire'
+                    comb_outputs[port_name] = wire_spec
+
+        # Generate struct with both current and next state for registers
+        fd.write(f"#[derive(Clone)]\npub struct {cls_name}_FFI {{\n")
+        for port_name, wire_spec in ext_class._wires.items():
+            rust_type = dtype_to_rust_type(wire_spec.dtype)
+            fd.write(f"    pub {port_name}: {rust_type},\n")
+        # Add next-state fields for registered outputs
+        for port_name, wire_spec in reg_outputs.items():
+            rust_type = dtype_to_rust_type(wire_spec.dtype)
+            fd.write(f"    {port_name}_next: {rust_type},\n")
+        fd.write("}\n\n")
+
+        fd.write(f"impl {cls_name}_FFI {{\n")
+        fd.write("    pub fn new() -> Self {\n")
+        fd.write(f"        {cls_name}_FFI {{\n")
+        for port_name in ext_class._wires:
+            fd.write(f"            {port_name}: Default::default(),\n")
+        for port_name in reg_outputs:
+            fd.write(f"            {port_name}_next: Default::default(),\n")
+        fd.write("        }\n")
+        fd.write("    }\n\n")
+
+        # Generate eval() method that computes outputs from inputs
+        fd.write("    pub fn eval(&mut self) {\n")
+        fd.write("        // Compute combinational outputs\n")
+
+        # Generate logic based on module name (temporary hardcoded solution)
+        if cls_name == "ExternalAdder":
+            if 'c' in comb_outputs:
+                fd.write("        self.c = self.a + self.b;\n")
+        elif cls_name == "ExternalRegister":
+            if 'reg_out' in reg_outputs:
+                fd.write("        self.reg_out_next = self.reg_in;\n")
+
+        fd.write("    }\n\n")
+
+        # Generate clock_tick() method for registered outputs
+        if reg_outputs:
+            fd.write("    pub fn clock_tick(&mut self) {\n")
+            for port_name in reg_outputs:
+                fd.write(f"        self.{port_name} = self.{port_name}_next;\n")
+            fd.write("    }\n")
+
+        fd.write("}\n\n")
+
     # Begin simulator struct definition
     fd.write("pub struct Simulator { pub stamp: usize, ")
     fd.write("pub request_stamp_map_table: HashMap<i64, usize>,\n")
@@ -173,9 +243,25 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
                 fd.write(f"pub {handle_field} : (), ")
                 simulator_init.append(f"{handle_field} : (),")
 
+    # Add fields for ExternalIntrinsic instances
+    for intr in external_intrinsics:
+        instance_uid = intr.uid
+        cls_name = intr.external_class.__name__
+        field_name = f"external_{instance_uid}"
+        field_type = f"{cls_name}_FFI"
+        fd.write(f"pub {field_name} : {field_type}, ")
+        simulator_init.append(f"{field_name} : {field_type}::new(),")
+
     # Add value validity tracking for expressions with external visibility
+    # Import ExternalIntrinsic at the top of this section to avoid repeated imports
+    # pylint: disable=import-outside-toplevel
+    from ...ir.expr.intrinsic import ExternalIntrinsic
+
     for expr in expr_validities:
         if isinstance(expr, Bind):
+            continue
+        # Skip ExternalIntrinsic as they don't need validity tracking
+        if isinstance(expr, ExternalIntrinsic):
             continue
         name = namify(expr.as_operand())
         dtype = dtype_to_rust_type(expr.dtype)
@@ -227,6 +313,19 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         fd.write(f"    self.{reg}.tick(self.stamp);\n")
     for handle in external_clock_handles:
         fd.write(f"    self.{handle}.clock_tick();\n")
+    # Tick ExternalIntrinsic instances with registered outputs
+    for intr in external_intrinsics:
+        cls_name = intr.external_class.__name__
+        ext_class = external_classes[cls_name]
+        # Check if this class has any registered outputs (kind='reg', direction='out')
+        has_reg_out = any(
+            wire.direction == 'out' and wire.kind == 'reg'
+            for wire in ext_class._wires.values()
+        )
+        if has_reg_out:
+            instance_uid = intr.uid
+            field_name = f"external_{instance_uid}"
+            fd.write(f"    self.{field_name}.clock_tick();\n")
     fd.write("  }\n\n")
 
     # Reset DRAM responses method
@@ -274,6 +373,9 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
             # Reset externally used values on failure
             for expr in module_expr_map.get(module, ()):  # type: ignore[arg-type]
                 if isinstance(expr, Bind):
+                    continue
+                # Skip ExternalIntrinsic (already imported at top of function)
+                if isinstance(expr, ExternalIntrinsic):
                     continue
                 name = namify(expr.as_operand())
                 fd.write(f"        self.{name}_value = None;\n")

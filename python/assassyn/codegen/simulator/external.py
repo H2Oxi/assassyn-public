@@ -260,9 +260,32 @@ def is_stub_external(module: Module) -> bool:
     return isinstance(module, ExternalSV) and not has_module_body(module)
 
 
+def collect_external_intrinsics(sys):
+    """Collect all ExternalIntrinsic instances from the system IR."""
+    # pylint: disable=import-outside-toplevel
+    from ...ir.expr.intrinsic import ExternalIntrinsic
+    from ...ir.visitor import Visitor
+
+    intrinsics = []
+
+    class ExternalIntrinsicCollector(Visitor):
+        """Visitor that collects ExternalIntrinsic instances."""
+
+        def visit_expr(self, node):
+            """Visit an expression and collect ExternalIntrinsic instances."""
+            if isinstance(node, ExternalIntrinsic):
+                intrinsics.append(node)
+
+    visitor = ExternalIntrinsicCollector()
+    visitor.visit_system(sys)
+
+    return intrinsics
+
+
 __all__ = [
     "codegen_external_wire_assign",
     "codegen_external_wire_read",
+    "collect_external_intrinsics",
     "collect_external_value_assignments",
     "collect_external_wire_reads",
     "collect_module_value_exposures",

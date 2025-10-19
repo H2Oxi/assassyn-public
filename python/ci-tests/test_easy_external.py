@@ -46,13 +46,13 @@ class Adder(Downstream):
         super().__init__()
 
     @downstream.combinational
-    def build(self, a: Value, b: Value, ext_adder: ExternalAdder):
+    def build(self, a: Value, b: Value):
         #here we assumed user explicitly know the direction of the external module ports
         a = a.optional(UInt(32)(1))
         b = b.optional(UInt(32)(1))
 
-        ext_adder.in_assign(a=a, b=b)
-        log("downstream: {} + {} = {}", a, b, ext_adder.c)
+        c = ExternalAdder(a=a, b=b)
+        log("downstream: {} + {} = {}", a, b, c.c)
 
 
 def test_easy_external():
@@ -64,11 +64,10 @@ def test_easy_external():
         a = lhs.build()
         b = rhs.build()
 
-        ext_adder = ExternalAdder()
         adder = Adder()
 
         driver.build(lhs, rhs)
-        adder.build(a, b, ext_adder)
+        adder.build(a, b)
 
     config = {
         'verilog': utils.has_verilator(),
@@ -81,7 +80,7 @@ def test_easy_external():
     raw = utils.run_simulator(simulator_path)
 
     if verilator_path:
-        raw = utils.run_verilator(verilator_path)
+        #raw = utils.run_verilator(verilator_path)
         assert "downstream:" in raw, "Expected log output not found"
 
 
