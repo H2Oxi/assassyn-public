@@ -109,7 +109,10 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
             id_expr, need_exposure = id_and_exposure
             if code:
                 lines = [f"{indent_str}let {id_expr} = {{ {code} }};"]
-                if need_exposure:
+                # Skip validity tracking for ExternalIntrinsic
+                # pylint: disable=import-outside-toplevel
+                from ...ir.expr.intrinsic import ExternalIntrinsic
+                if need_exposure and not isinstance(node, ExternalIntrinsic):
                     lines.append(f"{indent_str}sim.{id_expr}_value = Some({id_expr}.clone());")
                 key = (self.module_ctx, id_expr)
                 if (

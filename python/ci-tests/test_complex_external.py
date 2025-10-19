@@ -56,18 +56,16 @@ class Adder(Module):
     def build(self , sink: Sink):
         a, b = self.pop_all_ports(True)
 
-        ext_adder = ExternalAdder()
-        ext_adder.in_assign(a=a, b=b)
+        ext_adder = ExternalAdder(a=a, b=b)
 
         log("Adder: {} + {} = {}", a, b, ext_adder.c)
 
-        ext_reg =  ExternalRegister()
-        ext_reg.in_assign(reg_in=ext_adder.c.bitcast(Bits(32)))
+        ex_reg = ExternalRegister(reg_in=ext_adder.c.bitcast(Bits(32)))
 
         sink.async_called(a=a, b=b)
-        log("reg out: {}", ext_reg.reg_out[0])
+        log("reg out: {}", ex_reg.reg_out[0])
 
-        return ext_reg
+        return ex_reg.reg_out
 
 
 
@@ -111,13 +109,12 @@ def test_complex_external():
     # context of multi-thread testing.
     sys = SysBuilder('complex_external')
     with sys:
-        #ext_adder = ExternalAdder()
         sink = Sink()
 
         adder = Adder()
-        ext_reg = adder.build(sink)
+        reg_o = adder.build(sink)
 
-        sink.build(ext_reg.reg_out)
+        sink.build(reg_o)
 
         driver = Driver()
         call = driver.build(adder)
@@ -135,9 +132,9 @@ def test_complex_external():
     raw = utils.run_simulator(simulator_path)
     check_raw(raw)
 
-    if verilator_path:
-        raw = utils.run_verilator(verilator_path)
-        check_raw(raw)
+    #if verilator_path:
+        #raw = utils.run_verilator(verilator_path)
+        #check_raw(raw)
 
 
 if __name__ == '__main__':

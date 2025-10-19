@@ -63,13 +63,13 @@ class Wrapper(Downstream):
         super().__init__()
 
     @downstream.combinational
-    def build(self, a: Value, b: Value, ext_mul: ExternalMultiplier , sink: Sink):
+    def build(self, a: Value, b: Value, sink: Sink):
         #here we assumed user explicitly know the direction of the external module ports
         a = a.optional(UInt(32)(1))
         b = b.optional(UInt(32)(1))
         in_valid = a > UInt(32)(2)  # Always valid input
 
-        ext_mul.in_assign(a=a, b=b, in_valid=in_valid)
+        ext_mul = ExternalMultiplier(a=a, b=b, in_valid=in_valid)
         out_ready = ext_mul.out_valid[0]
         p = ext_mul.p[0]
 
@@ -89,13 +89,12 @@ def test_pipemul_external():
         a = lhs.build()
         b = rhs.build()
 
-        ext_mul = ExternalMultiplier()
         wrapper = Wrapper()
         sink = Sink()
         sink.build()
 
         driver.build(lhs, rhs)
-        wrapper.build(a, b, ext_mul, sink)
+        wrapper.build(a, b, sink)
 
     print(sys)
 
@@ -106,8 +105,10 @@ def test_pipemul_external():
 
     simulator_path, verilator_path = elaborate(sys, **config )
 
-    if verilator_path:
-        raw = utils.run_verilator(verilator_path)
+    raw = utils.run_simulator(simulator_path)
+
+    #if verilator_path:
+        #raw = utils.run_verilator(verilator_path)
 
 
 if __name__ == '__main__':

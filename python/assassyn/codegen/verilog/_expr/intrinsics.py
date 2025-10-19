@@ -9,7 +9,7 @@ from typing import Optional
 from string import Formatter
 
 from ....ir.expr import Log
-from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic
+from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic, ExternalIntrinsic
 from ....ir.const import Const
 from ....ir.dtype import Int
 from ....ir.block import CondBlock, CycledBlock
@@ -139,11 +139,45 @@ def codegen_pure_intrinsic(dumper, expr: PureIntrinsic) -> Optional[str]:
             return f"{rval} = self.{port_name}_valid"
         return f"{rval} = self.executed"
 
+    if intrinsic == PureIntrinsic.EXTERNAL_WIRE_OUT:
+        # Read WireOut from external module instance
+        instance = expr.args[0]  # ExternalIntrinsic
+        port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
+        instance_uid = instance.uid
+        module_name = instance.external_class._metadata['module_name']
+        wire_name = f"{module_name}_inst_{instance_uid}_{port_name}"
+        return f"{rval} = {wire_name}"
+
+    if intrinsic == PureIntrinsic.EXTERNAL_REG_OUT:
+        # Read RegOut from external module instance
+        instance = expr.args[0]  # ExternalIntrinsic
+        port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
+        # index = expr.args[2]  # For now, ignore index (assuming single element)
+        instance_uid = instance.uid
+        module_name = instance.external_class._metadata['module_name']
+        wire_name = f"{module_name}_inst_{instance_uid}_{port_name}"
+        return f"{rval} = {wire_name}"
+
     raise ValueError(f"Unknown intrinsic: {expr}")
+
+
+def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]:
+    """Generate Verilog for external module instantiation.
+
+    For now, we don't generate inline Verilog instantiation.
+    External modules will be handled separately through the external module system.
+    """
+    # Just assign a dummy value - actual external module handling is done elsewhere
+    rval = dumper.dump_rval(expr, False)
+    return f"{rval} = Bits(1)(1)  # External module instantiation"
 
 
 def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
     """Generate code for intrinsic operations."""
+    # Check if this is an ExternalIntrinsic first
+    if isinstance(expr, ExternalIntrinsic):
+        return codegen_external_intrinsic(dumper, expr)
+
     intrinsic = expr.opcode
 
     if intrinsic == Intrinsic.FINISH:
@@ -160,5 +194,8 @@ def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
         return None
     if intrinsic == Intrinsic.BARRIER:
         return None
+    if intrinsic == Intrinsic.EXTERNAL_INSTANTIATE:
+        # Should be handled by ExternalIntrinsic check above
+        raise RuntimeError("EXTERNAL_INSTANTIATE should be handled by ExternalIntrinsic")
 
     raise ValueError(f"Unknown block intrinsic: {expr}")
