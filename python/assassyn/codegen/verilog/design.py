@@ -241,7 +241,10 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             skip_exposure = isinstance(expr, ExternalIntrinsic)
 
             # For EXTERNAL_OUTPUT_READ, skip exposure only if the instance is in the same module
-            if isinstance(expr, PureIntrinsic) and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ:
+            if (
+                isinstance(expr, PureIntrinsic)
+                and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ
+            ):
                 instance = expr.args[0]  # The ExternalIntrinsic
                 instance_owner = self.external_instance_owners.get(instance)
                 # Skip exposure if the instance is in the current module

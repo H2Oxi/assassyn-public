@@ -64,8 +64,8 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
         added_external_ports.add(port_name)
 
     for ext_val in node.externals:
-        if (isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const)
-                or isinstance(ext_val, ExternalIntrinsic)):
+        if isinstance(ext_val, (Bind, ExternalIntrinsic)) or isinstance(
+                unwrap_operand(ext_val), Const):
             continue
         port_name = dumper.get_external_port_name(ext_val)
         parent_module = getattr(getattr(ext_val, 'parent', None), 'module', None)

@@ -77,15 +77,17 @@ def dump_rval(dumper, node, with_namespace: bool, module_name: str = None) -> st
 
     # Special case: check for external expressions first
     # Skip ExternalIntrinsic - they should never be accessed as ports
-    if (
-        isinstance(node, Expr)
-        and not isinstance(node, ExternalIntrinsic)
-        and dumper.current_module is not None
-        and hasattr(dumper.current_module, 'externals')
-        and node in dumper.current_module.externals
-        and not dumper.is_top_generation
-    ):
-        return f"self.{dumper.get_external_port_name(node)}"
+    if isinstance(node, Expr) and not isinstance(node, ExternalIntrinsic):
+        has_externals = False
+        if dumper.current_module is not None:
+            has_externals = hasattr(dumper.current_module, 'externals')
+        if (
+            dumper.current_module is not None
+            and has_externals
+            and node in dumper.current_module.externals
+            and not dumper.is_top_generation
+        ):
+            return f"self.{dumper.get_external_port_name(node)}"
 
     node_type = type(node)
 
