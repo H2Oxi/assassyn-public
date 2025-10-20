@@ -49,7 +49,7 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
 This function is the main entry point for Verilog code generation, orchestrating the complete elaboration process. It performs the following comprehensive steps:
 
 1. **Directory Setup**: Resolves the output directory (default `<cwd>/verilog`), ensures it exists, and optionally wipes prior results when `override_dump` is set.
-2. **External Module Analysis**: Collects the source files referenced by `ExternalSV` modules so they can be copied alongside the generated design.
+2. **External Module Analysis**: Collects source files referenced by `ExternalSV` classes that appear through `ExternalIntrinsic` nodes so they can be copied alongside the generated design.
 3. **Design Generation**: Calls `generate_design()` to build `design.py` and capture log metadata for the testbench.
 4. **Alias Discovery**: If a previous `Top.sv` exists, scans it for parameterised module aliases (e.g. `fifo_1`) so matching resource files can be cloned.
 5. **Testbench Generation**: Calls `generate_testbench()` with the discovered alias list and external file names, ensuring the Cocotb harness imports every required HDL artifact.

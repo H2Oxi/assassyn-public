@@ -104,7 +104,7 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 1. **Execution Control**: `wait_until`, `cond_stack`, and `finish_conditions` track predicate stacking, wait-until clauses, and FINISH intrinsics.
 2. **Module State**: `current_module`, `_exposes`, `module_ctx`, and `exposed_ports_to_add` capture which values need to become ports.
 3. **Array Management**: `array_write_port_mapping`, `array_users`, `sram_payload_arrays`, and `memory_defs` orchestrate multi-port array writers and SRAM payloads.
-4. **External Integration**: `pending_external_inputs`, `instantiated_external_modules`, `external_wire_assignments`, `external_wire_assignment_keys`, `external_wire_outputs`, and `external_modules` keep track of how external SystemVerilog modules are instantiated and how their signals flow from producers to consumers.
+4. **External Integration**: `external_intrinsics`, `external_classes`, `external_wrapper_names`, `external_instance_names`, and `external_instance_owners` track how `ExternalIntrinsic` nodes map to wrapper modules and expose signals across modules.
 5. **Expression Naming**: `expr_to_name` and `name_counters` guarantee deterministic signal names whenever expression results must be reused across statements.
 6. **Code Generation**: `code`, `logs`, and `indent` store emitted lines and diagnostic information used later by the testbench.
 

@@ -1,6 +1,6 @@
 # Intrinsic Expression Generation
 
-This module provides Verilog code generation for intrinsic operations, including logging, pure intrinsics (FIFO operations, value validation), and block intrinsics (finish, assert, wait_until, barrier).
+This module provides Verilog code generation for intrinsic operations, including logging, pure intrinsics (FIFO operations, value validation, external output reads), and block intrinsics (finish, assert, wait_until, barrier, external instantiation).
 
 ## Summary
 
@@ -67,6 +67,11 @@ This function generates Verilog code for pure intrinsic operations, which are si
    - For internal values: generates `self.executed` signal
    - Used to check if a value is valid in the current execution context
 
+4. **EXTERNAL_OUTPUT_READ**: Reads a port from an `ExternalIntrinsic`
+   - Ensures the external wrapper is instantiated and cached in `external_instance_names`
+   - Handles both single-bit wire outputs and indexed register outputs (`port[index]`)
+   - Returns a reference to the wrapper's exposed field (cloning index computations when needed)
+
 The function handles FIFO operations by generating appropriate signal references and managing the expose mechanism for peek operations.
 
 **Project-specific Knowledge Required**:
@@ -104,6 +109,10 @@ This function generates Verilog code for block intrinsic operations, which are c
    - Returns `None` as barriers don't generate code in the current implementation
    - Reserved for future synchronization features
 
+5. **EXTERNAL_INSTANTIATE / ExternalIntrinsic**: Creates and wires external modules in-line
+   - `ExternalIntrinsic` instances are handled before the opcode switch, generating calls to `<wrapper>::new()` and wiring all inputs
+   - Updates the dumper's bookkeeping (`external_instance_names`, `external_instance_owners`) so later passes can reference the external wrapper consistently
+
 The function integrates with the credit-based pipeline architecture by managing execution conditions and finish signals.
 
 **Project-specific Knowledge Required**:
@@ -119,6 +128,7 @@ The module uses several utility functions:
 - `dump_rval()` from [rval module](/python/assassyn/codegen/verilog/rval.md) for generating signal references
 - `unwrap_operand()` and `namify()` from [utils module](/python/assassyn/utils.md) for operand processing and name generation
 - `get_pred()` from [CIRCTDumper](/python/assassyn/codegen/verilog/design.md) for getting current execution predicate
+- `external_instance_names` / `external_wrapper_names` maps on the dumper to coordinate `ExternalIntrinsic` handling across passes
 
 The intrinsic expression generation is integrated into the main expression dispatch system through the [__init__.py](/python/assassyn/codegen/verilog/_expr/__init__.md) module, which routes different expression types to their appropriate code generation functions.
 

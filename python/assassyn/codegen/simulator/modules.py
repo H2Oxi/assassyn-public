@@ -7,20 +7,12 @@ import typing
 from ...ir.visitor import Visitor
 from ...ir.block import Block, CondBlock, CycledBlock
 from ...ir.dtype import RecordValue
-from ...ir.expr import Expr, WireAssign, WireRead
+from ...ir.expr import Expr
 from ...utils import namify
 from .node_dumper import dump_rval_ref
 from ...analysis import expr_externally_used
-from .utils import dtype_to_rust_type
 from ...ir.module.external import ExternalSV
-from .external import (
-    codegen_external_wire_assign,
-    codegen_external_wire_read,
-    collect_external_value_assignments,
-    external_handle_field,
-    has_module_body,
-    lookup_external_port,
-)
+from .external import has_module_body
 
 if typing.TYPE_CHECKING:
     from ...ir.module import Module
@@ -30,14 +22,11 @@ if typing.TYPE_CHECKING:
 class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
     """Visitor for elaborating modules with ExternalSV support."""
 
-    def __init__(self, sys, external_specs: dict[str, typing.Any] | None = None):
+    def __init__(self, sys):
         super().__init__()
         self.indent = 0
         self.module_name = ""
         self.module_ctx = None
-        self.external_specs = external_specs or getattr(sys, "_external_ffi_specs", {})
-        self.external_value_assignments = collect_external_value_assignments(sys)
-        self.emitted_external_assignments = set()
 
     def visit_module(self, node: Module):
         """Visit a module and generate its implementation."""
@@ -63,25 +52,6 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
         """Visit an expression and generate its implementation."""
         from ._expr import codegen_expr  # pylint: disable=import-outside-toplevel
 
-        if isinstance(node, WireAssign):
-            value_code = dump_rval_ref(self.module_ctx, node.value)
-            code = codegen_external_wire_assign(
-                node,
-                external_specs=self.external_specs,
-                external_value_assignments=self.external_value_assignments,
-                value_code=value_code,
-            )
-            if code:
-                indent_str = " " * self.indent
-                return f"{indent_str}{code}\n"
-            return ""
-
-        custom_code = None
-        if isinstance(node, WireRead):
-            custom_code = codegen_external_wire_read(
-                node,
-                external_specs=self.external_specs,
-            )
 
         id_and_exposure = None
         if node.is_valued():
@@ -89,14 +59,7 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
             id_expr = namify(node.as_operand())
             id_and_exposure = (id_expr, need_exposure)
 
-        code = (
-            custom_code
-            if custom_code is not None
-            else codegen_expr(
-                node,
-                self.module_ctx,
-            )
-        )
+        code = codegen_expr(node, self.module_ctx)
 
         indent_str = " " * self.indent
         result = ""
@@ -114,28 +77,6 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
                 from ...ir.expr.intrinsic import ExternalIntrinsic
                 if need_exposure and not isinstance(node, ExternalIntrinsic):
                     lines.append(f"{indent_str}sim.{id_expr}_value = Some({id_expr}.clone());")
-                key = (self.module_ctx, id_expr)
-                if (
-                    key in self.external_value_assignments
-                    and key not in self.emitted_external_assignments
-                ):
-                    assignments = self.external_value_assignments[key]
-                    for ext_module, wire in assignments:
-                        handle_field = external_handle_field(ext_module.name)
-                        setter_suffix = namify(wire.name)
-                        port_spec = lookup_external_port(
-                            self.external_specs, ext_module.name, wire.name, "input"
-                        )
-                        rust_ty = (
-                            port_spec.rust_type
-                            if port_spec is not None
-                            else dtype_to_rust_type(wire.dtype)
-                        )
-                        lines.append(
-                            f"{indent_str}sim.{handle_field}.set_{setter_suffix}("
-                            f"ValueCastTo::<{rust_ty}>::cast(&{id_expr}));"
-                        )
-                    self.emitted_external_assignments.add(key)
                 result = "\n".join(lines) + "\n"
         else:
             if code:
@@ -203,8 +144,7 @@ def dump_modules(sys: SysBuilder, modules_dir):
     """Generate individual module files in the modules/ directory."""
     modules_dir.mkdir(exist_ok=True)
 
-    external_specs = getattr(sys, "_external_ffi_specs", {})
-    em = ElaborateModule(sys, external_specs)
+    em = ElaborateModule(sys)
 
     mod_rs_path = modules_dir / "mod.rs"
     with open(mod_rs_path, 'w', encoding="utf-8") as mod_fd:

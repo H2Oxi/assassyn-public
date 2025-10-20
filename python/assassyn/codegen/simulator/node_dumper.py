@@ -1,14 +1,12 @@
 """Node reference dumper for simulator code generation."""
 
 from .utils import int_imm_dumper_impl, fifo_name, dtype_to_rust_type
-from .external import external_handle_field
 from ...utils import unwrap_operand, namify
-from ...ir.expr import Expr, WireRead
+from ...ir.expr import Expr
 from ...ir.array import Array
 from ...ir.const import Const
 from ...ir.module import Module, Port
 from ...ir.expr.intrinsic import PureIntrinsic
-from ...ir.module.external import ExternalSV
 
 
 def _handle_array(unwrapped, _module_ctx):
@@ -33,28 +31,6 @@ def _handle_module(unwrapped, _module_ctx):
 
 def _handle_expr(unwrapped, module_ctx):
     """Handle Expr nodes."""
-    if isinstance(unwrapped, WireRead):
-        wire = unwrapped.wire
-        owner = getattr(wire, "parent", None) or getattr(wire, "module", None)
-        if isinstance(owner, ExternalSV):
-            kind = getattr(wire, "kind", "wire")
-            if kind in ("wire", "reg"):
-                field_id = namify(unwrapped.as_operand())
-                handle_field = external_handle_field(owner.name)
-                method_suffix = namify(wire.name)
-                rust_ty = dtype_to_rust_type(unwrapped.dtype)
-                return (
-                    "{\n"
-                    f"        if sim.{field_id}_value.is_none() {{\n"
-                    f"            sim.{handle_field}.eval();\n"
-                    f"            let value = sim.{handle_field}.get_{method_suffix}();\n"
-                    f"            let value = ValueCastTo::<{rust_ty}>::cast(&value);\n"
-                    f"            sim.{field_id}_value = Some(value.clone());\n"
-                    "        }\n"
-                    f"        sim.{field_id}_value.as_ref().unwrap().clone()\n"
-                    "    }"
-                )
-
     # Figure out the ID format based on context
     parent_block = unwrapped.parent
     if module_ctx != parent_block.module:

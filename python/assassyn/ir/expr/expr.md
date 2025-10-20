@@ -49,7 +49,7 @@ The base class for all expression nodes in the IR. It serves as the foundation f
 - `is_unary()` - Check if the opcode is a unary operator  
 - `is_valued()` - Check if this operation has a return value
 
-Internally, the constructor normalizes operands through `_prepare_operand`. Direct references to `Array`, `Port`, or `Wire` objects are registered with the operand's `users` list. Expression operands must originate from the same module unless `_is_cross_module_allowed()` explicitly approves the reference. At present the only cross-module exception is a `WireRead` whose source belongs to an `ExternalSV` module, enabling external SystemVerilog outputs to be shared across multiple Assassyn modules without relaxing other invariants.
+Internally, the constructor normalizes operands through `_prepare_operand`. Direct references to `Array`, `Port`, or `Wire` objects are registered with the operand's `users` list. Expression operands must originate from the same module unless `_is_cross_module_allowed()` explicitly approves the reference. Today the only cross-module exceptions are `PureIntrinsic` nodes for external output reads and `ExternalIntrinsic` handles, which let external SystemVerilog modules share outputs without relaxing other invariants.
 
 #### `class Operand`
 
@@ -145,32 +145,6 @@ A specialized multiplexer controlled by a one-hot encoded signal.
 - `values` - Get the list of possible values (property)
 - `dtype` - Get the data type of this operation (property)
 
-#### `class WireAssign(Expr)`
-
-Represents wire assignment operations for external connections.
-
-**Constants:**
-- `WIRE_ASSIGN = 1100`
-
-**Methods:**
-- `__init__(wire, value)` - Initialize wire assignment
-- `wire` - Get the wire being assigned to (property)
-- `value` - Get the value being assigned (property)
-
-#### `class WireRead(Expr)`
-
-Represents reading from an external wire.
-
-**Constants:**
-- `WIRE_READ = 1101`
-
-**Methods:**
-- `__init__(wire)` - Initialize wire read operation
-- `wire` - Return the wire being read (property)
-- `dtype` - The data type carried by the wire (property)
-
-`WireRead` nodes form the bridge between Python-defined modules and external SystemVerilog implementations. They are the only expression operands that may legally cross module boundaries during construction—`_is_cross_module_allowed()` grants an exception so consumers in other modules can observe external outputs.
-
 #### `class Log(Expr)`
 
 A non-synthesizable node that functions as a print statement for debugging during simulation.
@@ -199,26 +173,6 @@ The exposed frontend function to instantiate a log operation.
 **Explanation:**
 This function creates a `Log` expression node for debugging purposes. The first argument must be a string format, followed by values to be logged. This is non-synthesizable and only works during simulation.
 
-#### `def wire_assign(wire, value) -> WireAssign`
-
-Create a wire assignment expression.
-
-**Parameters:**
-- `wire` - The wire to assign to
-- `value` - The value to assign
-
-**Returns:**
-- `WireAssign` - The wire assignment expression node
-
-#### `def wire_read(wire) -> WireRead`
-
-Create a wire read expression.
-
-**Parameters:**
-- `wire` - The wire to read from
-
-**Returns:**
-- `WireRead` - The wire read expression node
 
 ---
 
@@ -299,6 +253,5 @@ The `is_valued()` method determines if an expression produces a value that can b
 - `Concat` operations
 - `Select` operations
 - `Select1Hot` operations
-- `WireRead` operations
 - Binary and unary operations
 - `Intrinsic` operations that may return values (like `send_write_request` and `send_read_request`)

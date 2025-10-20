@@ -38,7 +38,7 @@ This function generates comprehensive port declarations for Verilog modules base
 
 3. **Pipeline Module Ports**: For regular pipeline modules (drivers or async callees), adds the trigger-counter backpressure input (`trigger_counter_pop_valid`).
 
-4. **External Value Inputs**: Iterates over `node.externals`, building `<producer>_<value>` and `<producer>_<value>_valid` inputs for every exposed expression (excluding bindings and constants). Wire reads that originate from an `ExternalSV` producer are skipped because they are handled via dedicated external wiring.
+4. **External Value Inputs**: Iterates over `node.externals`, building `<producer>_<value>` and `<producer>_<value>_valid` inputs for every exposed expression (excluding bindings and constants). Since the external system now flows through `ExternalIntrinsic`, there is no longer a special-case skip for legacy `WireRead` nodes.
 
 5. **FIFO Handshake Ports**:
    - For pipeline modules, declares FIFO inputs (`port`, `port_valid`) and optional `port_pop_ready` outputs when the module pops from the FIFO.

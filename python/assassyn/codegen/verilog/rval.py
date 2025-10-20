@@ -4,7 +4,7 @@ from ...ir.module import Module, Port, Wire
 from ...ir.const import Const
 from ...ir.array import Array
 from ...ir.dtype import RecordValue
-from ...ir.expr import Expr, FIFOPop, WireRead
+from ...ir.expr import Expr, FIFOPop
 from ...utils import namify, unwrap_operand
 from .utils import dump_type
 def _dump_fifo_pop(_dumper, node, with_namespace: bool, _module_name: str = None) -> str:
