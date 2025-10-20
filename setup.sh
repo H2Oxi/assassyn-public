@@ -9,10 +9,6 @@ echo "Adding $REPO_PATH/python to PYTHONPATH"
 export PYTHONPATH=$REPO_PATH/python:$PYTHONPATH
 echo "Setting ASSASSYN_HOME to $REPO_PATH"
 export ASSASSYN_HOME=$REPO_PATH
-if [ -d "$REPO_PATH/3rd-party/circt/frontends/PyCDE/dist/lib" ]; then
-  echo "Adding PyCDE to PYTHONPATH."
-  export PYTHONPATH="$REPO_PATH/3rd-party/circt/frontends/PyCDE/dist/lib:$PYTHONPATH"
-fi
 
 # Set up Rust simulator runtime cache directory
 export CARGO_TARGET_DIR=$REPO_PATH/.sim-runtime-cache
