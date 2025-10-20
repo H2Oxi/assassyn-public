@@ -4,6 +4,7 @@ from typing import List
 from .utils import dump_type, get_sram_info
 from ...ir.module import Module
 from ...ir.expr import FIFOPop, Bind
+from ...ir.expr.intrinsic import ExternalIntrinsic
 from ...ir.const import Const
 from ...utils import namify, unwrap_operand
 
@@ -49,8 +50,22 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
 
     added_external_ports = set()
 
+    consumer_entries = [
+        entry for entry in getattr(dumper, 'cross_module_external_reads', [])
+        if entry['consumer'] is node
+    ]
+    for entry in consumer_entries:
+        port_name = dumper.get_external_port_name(entry['expr'])
+        if port_name in added_external_ports:
+            continue
+        dtype = dump_type(entry['expr'].dtype)
+        dumper.append_code(f'{port_name} = Input({dtype})')
+        dumper.append_code(f'{port_name}_valid = Input(Bits(1))')
+        added_external_ports.add(port_name)
+
     for ext_val in node.externals:
-        if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
+        if (isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const)
+                or isinstance(ext_val, ExternalIntrinsic)):
             continue
         port_name = dumper.get_external_port_name(ext_val)
         parent_module = getattr(getattr(ext_val, 'parent', None), 'module', None)

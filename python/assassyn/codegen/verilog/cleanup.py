@@ -316,4 +316,23 @@ def cleanup_post_generation(dumper):
             dumper.append_code(f'self.expose_{exposed_name} = {rval}')
             dumper.append_code(f'self.valid_{exposed_name} = executed_wire')
 
+    external_exposures = dumper.external_output_exposures.get(dumper.current_module, {})
+    for data in external_exposures.values():
+        output_name = data['output_name']
+        dtype_str = dump_type(data['dtype'])
+        dumper.exposed_ports_to_add.append(f'expose_{output_name} = Output({dtype_str})')
+        dumper.exposed_ports_to_add.append(f'valid_{output_name} = Output(Bits(1))')
+        index_key = data.get('index_key')
+        index_operand = data['index_operand']
+        if index_key is None or index_key == ('const', 0):
+            source_expr = f"{data['instance_name']}.{data['port_name']}"
+        elif index_operand is not None:
+            index_code = dumper.dump_rval(index_operand, False)
+            source_expr = f"{data['instance_name']}.{data['port_name']}[{index_code}]"
+        else:
+            source_expr = f"{data['instance_name']}.{data['port_name']}"
+        dumper.append_code(f'# External output exposure: {source_expr}')
+        dumper.append_code(f'self.expose_{output_name} = {source_expr}')
+        dumper.append_code(f'self.valid_{output_name} = executed_wire')
+
     dumper.append_code('self.executed = executed_wire')

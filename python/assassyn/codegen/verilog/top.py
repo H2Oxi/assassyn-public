@@ -20,6 +20,7 @@ from ...ir.expr import (
     Bind,
     Intrinsic,
 )
+from ...ir.expr.intrinsic import ExternalIntrinsic
 from ...ir.dtype import Record
 from ...utils import namify, unwrap_operand
 from ...ir.const import Const
@@ -293,7 +294,8 @@ def generate_top_harness(dumper):
     def _attach_external_values(module, port_map, handled_ports):
         local_ports = set()
         for ext_val in module.externals:
-            if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
+            if (isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const)
+                    or isinstance(ext_val, ExternalIntrinsic)):
                 continue
 
             producer_module = getattr(ext_val.parent, 'module', None)

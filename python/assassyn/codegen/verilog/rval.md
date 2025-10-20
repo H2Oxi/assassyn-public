@@ -30,7 +30,7 @@ def dump_rval(dumper, node, with_namespace: bool, module_name: str = None) -> st
 This is the main function for converting Assassyn IR nodes into Verilog signal references. It performs the following steps:
 
 1. **Operand Unwrapping**: Uses `unwrap_operand()` to handle wrapped operands and get the actual node
-2. **External Expression Handling**: Checks if the node is an external expression and generates appropriate port references (`self.<producer>_<value>`).
+2. **External Expression Handling**: Checks if the node is an external expression and generates appropriate port references (`self.<producer>_<value>`), while explicitly skipping `ExternalIntrinsic` handles so that only the underlying `PureIntrinsic.EXTERNAL_OUTPUT_READ` nodes are surfaced as ports.
 3. **Type Dispatch**: Uses a dispatch table to route different node types to their specific dump functions.
 4. **Expression Handling**: For expression nodes, generates unique names (using `expr_to_name`/`name_counters`) and handles namespace requirements.
 5. **Fallback Handling**: Provides fallback mechanisms for subclasses not explicitly handled.
