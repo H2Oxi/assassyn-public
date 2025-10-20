@@ -12,7 +12,6 @@ from .utils import (
 
 from ...analysis import topo_downstream_modules
 from ...ir.module import Downstream
-from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
 from ...ir.expr import (
     FIFOPush,
@@ -290,31 +289,47 @@ def generate_top_harness(dumper):
                 f'{valid_name}.assign(inst_{producer_name}.valid_{producer_port})',
             ]
             _queue_cross_module_assignments(producer_module, assignments)
+        return handled_consumer_ports
 
-    def _attach_external_module_inputs(module, port_map):
-        in_wires = getattr(module, 'in_wires', None)
-        if not in_wires:
-            return
-        for _, source_expr in in_wires.items():
-            if source_expr is None:
+    def _attach_external_values(module, port_map, handled_ports):
+        local_ports = set()
+        for ext_val in module.externals:
+            if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
                 continue
-            producer_module = getattr(source_expr.parent, 'module', None)
+
+            if isinstance(ext_val, WireRead):
+                wire = getattr(ext_val, 'wire', None)
+                owner = getattr(wire, 'parent', None) if wire is not None else None
+                if owner is None and wire is not None:
+                    owner = getattr(wire, 'module', None)
+                producer_module = owner or getattr(ext_val.parent, 'module', None)
+            else:
+                producer_module = getattr(ext_val.parent, 'module', None)
+
             if producer_module is None:
                 continue
-            producer_name = namify(producer_module.name)
-            port_name = dumper.get_external_port_name(source_expr)
-            dtype = dump_type(source_expr.dtype)
+
+            port_name = dumper.get_external_port_name(ext_val)
+            if port_name in handled_ports or port_name in local_ports:
+                continue
+
+            dtype = dump_type(ext_val.dtype)
             _declare_cross_module_wire(port_name, dtype)
             valid_name = f"{port_name}_valid"
             _declare_cross_module_wire(valid_name, "Bits(1)")
             port_map.append(f"{port_name}={port_name}")
             port_map.append(f"{valid_name}={valid_name}")
-            exposed_name = dumper.dump_rval(source_expr, True)
+
+            producer_name = namify(producer_module.name)
+            exposed_name = dumper.dump_rval(ext_val, True, producer_name)
             assignments = [
                 f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
                 f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
             ]
             _queue_cross_module_assignments(producer_module, assignments)
+            local_ports.add(port_name)
+
+        return handled_ports.union(local_ports)
 
     for module in instantiation_modules:  # pylint: disable=too-many-nested-blocks
         mod_name = namify(module.name)
@@ -339,7 +354,8 @@ def generate_top_harness(dumper):
                     )
                 port_map.append(f"{namify(port.name)}_valid={fifo_base_name}_pop_valid")
 
-            _attach_consumer_external_entries(module, port_map)
+            handled_ports = _attach_consumer_external_entries(module, port_map)
+            _attach_external_values(module, port_map, handled_ports)
 
         else:
             if module in dumper.downstream_dependencies:
@@ -347,47 +363,9 @@ def generate_top_harness(dumper):
                     dep_name = namify(dep_mod.name)
                     port_map.append(f"{dep_name}_executed=inst_{dep_name}.executed")
 
-            _attach_consumer_external_entries(module, port_map)
+            handled_ports = _attach_consumer_external_entries(module, port_map)
+            _attach_external_values(module, port_map, handled_ports)
 
-            if isinstance(module, ExternalSV):
-                _attach_external_module_inputs(module, port_map)
-            else:
-                for ext_val in module.externals:
-                    if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
-                        continue
-                    if isinstance(ext_val, WireRead):
-                        wire = getattr(ext_val, 'wire', None)
-                        owner = getattr(wire, 'parent', None) if wire is not None else None
-                        if owner is None and wire is not None:
-                            owner = getattr(wire, 'module', None)
-                        if isinstance(owner, ExternalSV):
-                            continue
-                    producer_module = ext_val.parent.module
-                    producer_ctx_name = namify(producer_module.name)
-                    if isinstance(ext_val, WireRead):
-                        wire = getattr(ext_val, 'wire', None)
-                        owner = getattr(wire, 'parent', None) if wire is not None else None
-                        if owner is None and wire is not None:
-                            owner = getattr(wire, 'module', None)
-                        if owner is not None:
-                            producer_module = owner
-                            producer_ctx_name = namify(owner.name)
-                    producer_name = namify(producer_module.name)
-                    port_name = dumper.get_external_port_name(ext_val)
-                    exposed_name = dumper.dump_rval(ext_val, True, producer_ctx_name)
-                    dtype = dump_type(ext_val.dtype)
-                    _declare_cross_module_wire(port_name, dtype)
-                    valid_name = f"{port_name}_valid"
-                    _declare_cross_module_wire(valid_name, "Bits(1)")
-
-                    port_map.append(f"{port_name}={port_name}")
-                    port_map.append(f"{valid_name}={valid_name}")
-
-                    assignments = [
-                        f'{port_name}.assign(inst_{producer_name}.expose_{exposed_name})',
-                        f'{valid_name}.assign(inst_{producer_name}.valid_{exposed_name})',
-                    ]
-                    _queue_cross_module_assignments(producer_module, assignments)
             if is_sram:
                 sram_info = get_sram_info(module)
                 array = sram_info['array']
@@ -442,9 +420,6 @@ def generate_top_harness(dumper):
             )
 
         dumper.append_code(f"inst_{mod_name} = {mod_name}({', '.join(port_map)})")
-
-        if isinstance(module, ExternalSV):
-            continue
 
         if is_sram:
             sram_info = get_sram_info(module)

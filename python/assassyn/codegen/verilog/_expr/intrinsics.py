@@ -139,24 +139,33 @@ def codegen_pure_intrinsic(dumper, expr: PureIntrinsic) -> Optional[str]:
             return f"{rval} = self.{port_name}_valid"
         return f"{rval} = self.executed"
 
-    if intrinsic == PureIntrinsic.EXTERNAL_WIRE_OUT:
-        # Read WireOut from external module instance
+    if intrinsic == PureIntrinsic.EXTERNAL_OUTPUT_READ:
         instance = expr.args[0]  # ExternalIntrinsic
         port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
-        instance_uid = instance.uid
-        module_name = instance.external_class._metadata['module_name']
-        wire_name = f"{module_name}_inst_{instance_uid}_{port_name}"
-        return f"{rval} = {wire_name}"
 
-    if intrinsic == PureIntrinsic.EXTERNAL_REG_OUT:
-        # Read RegOut from external module instance
-        instance = expr.args[0]  # ExternalIntrinsic
-        port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
-        # index = expr.args[2]  # For now, ignore index (assuming single element)
-        instance_uid = instance.uid
-        module_name = instance.external_class._metadata['module_name']
-        wire_name = f"{module_name}_inst_{instance_uid}_{port_name}"
-        return f"{rval} = {wire_name}"
+        inst_name = dumper.external_instance_names.get(instance)
+        if inst_name is None:
+            inst_name = dumper.dump_rval(instance, False)
+            dumper.external_instance_names[instance] = inst_name
+
+        wire_spec = instance.external_class._wires.get(port_name)
+        index = expr.args[2] if len(expr.args) > 2 else None
+
+        # Registered outputs behave like single-element arrays in the frontend.
+        # Verilog code should treat index 0 as the scalar signal itself.
+        if wire_spec is not None and wire_spec.kind == 'reg':
+            if index is not None:
+                idx_operand = unwrap_operand(index)
+                if isinstance(idx_operand, Const) and idx_operand.value == 0:
+                    return f"{rval} = {inst_name}.{port_name}"
+                index_code = dumper.dump_rval(index, False)
+                return f"{rval} = {inst_name}.{port_name}[{index_code}]"
+            return f"{rval} = {inst_name}.{port_name}"
+
+        if index is not None:
+            index_code = dumper.dump_rval(index, False)
+            return f"{rval} = {inst_name}.{port_name}[{index_code}]"
+        return f"{rval} = {inst_name}.{port_name}"
 
     raise ValueError(f"Unknown intrinsic: {expr}")
 
@@ -167,9 +176,27 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
     For now, we don't generate inline Verilog instantiation.
     External modules will be handled separately through the external module system.
     """
-    # Just assign a dummy value - actual external module handling is done elsewhere
     rval = dumper.dump_rval(expr, False)
-    return f"{rval} = Bits(1)(1)  # External module instantiation"
+    ext_class = expr.external_class
+    metadata = getattr(ext_class, "_metadata", {})
+    wrapper_name = dumper.external_wrapper_names.get(ext_class)
+    if wrapper_name is None:
+        wrapper_name = f"{ext_class.__name__}_ffi"
+        dumper.external_wrapper_names[ext_class] = wrapper_name
+
+    connections = []
+    if metadata.get('has_clock'):
+        connections.append('clk=self.clk')
+    if metadata.get('has_reset'):
+        connections.append('rst=self.rst')
+    for port_name, value in expr.input_connections.items():
+        value_code = dumper.dump_rval(value, False)
+        connections.append(f"{port_name}={value_code}")
+
+    call = f"{wrapper_name}({', '.join(connections)})" if connections else f"{wrapper_name}()"
+    dumper.external_instance_names[expr] = rval
+    dumper.external_instance_owners[expr] = dumper.current_module
+    return f"{rval} = {call}"
 
 
 def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
