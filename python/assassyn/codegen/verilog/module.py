@@ -53,7 +53,11 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
         if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
             continue
         port_name = dumper.get_external_port_name(ext_val)
-        print(f"[verilog] module {node.name} external port {port_name} from {getattr(getattr(ext_val, 'parent', None), 'module', None)} expr={ext_val}")
+        parent_module = getattr(getattr(ext_val, 'parent', None), 'module', None)
+        print(
+            f"[verilog] module {node.name} external port {port_name} "
+            f"from {parent_module} expr={ext_val}"
+        )
         if port_name in added_external_ports:
             continue
         port_type = dump_type(ext_val.dtype)

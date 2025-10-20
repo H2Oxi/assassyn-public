@@ -409,7 +409,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
     def _generate_external_module_wrapper(self, ext_class):
         """Generate a PyCDE wrapper class for an external ExternalSV descriptor."""
         class_name = f"{ext_class.__name__}_ffi"
-        metadata = getattr(ext_class, "_metadata", {})
+        metadata = ext_class.metadata()
         module_name = metadata.get('module_name', ext_class.__name__)
 
         self.external_wrapper_names[ext_class] = class_name
@@ -424,7 +424,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         if metadata.get('has_reset'):
             self.append_code('rst = Reset()')
 
-        wires = getattr(ext_class, "_wires", {})
+        wires = ext_class.port_specs()
         for wire_name, wire_spec in wires.items():
             wire_type = dump_type(wire_spec.dtype)
             if wire_spec.direction == 'in':

@@ -86,7 +86,6 @@ def collect_external_intrinsics(sys):
     """Collect all ExternalIntrinsic instances from the system IR."""
     # pylint: disable=import-outside-toplevel
     from ...ir.expr.intrinsic import ExternalIntrinsic
-    from ...ir.visitor import Visitor
 
     intrinsics = []
 

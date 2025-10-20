@@ -119,53 +119,74 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
         dumper.logs.append(f'print({final_print_string})')
 
 
+def _handle_fifo_intrinsic(dumper, expr, intrinsic, rval):
+    """Handle FIFO_VALID and FIFO_PEEK intrinsics."""
+    if intrinsic not in (PureIntrinsic.FIFO_VALID, PureIntrinsic.FIFO_PEEK):
+        return None
+
+    fifo = expr.args[0]
+    fifo_name = dumper.dump_rval(fifo, False)
+    if intrinsic == PureIntrinsic.FIFO_PEEK:
+        dumper.expose('expr', expr)
+        return f'{rval} = self.{fifo_name}'
+    return f'{rval} = self.{fifo_name}_valid'
+
+
+def _handle_value_valid(dumper, expr, intrinsic, rval):
+    """Handle VALUE_VALID intrinsic."""
+    if intrinsic != PureIntrinsic.VALUE_VALID:
+        return None
+
+    value_expr = expr.operands[0].value
+    if value_expr.parent.module != expr.parent.module:
+        port_name = dumper.get_external_port_name(value_expr)
+        return f"{rval} = self.{port_name}_valid"
+    return f"{rval} = self.executed"
+
+
+def _handle_external_output(dumper, expr, intrinsic, rval):
+    """Handle reads from external module outputs."""
+    if intrinsic != PureIntrinsic.EXTERNAL_OUTPUT_READ:
+        return None
+
+    instance = expr.args[0]  # ExternalIntrinsic
+    port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
+
+    inst_name = dumper.external_instance_names.get(instance)
+    if inst_name is None:
+        inst_name = dumper.dump_rval(instance, False)
+        dumper.external_instance_names[instance] = inst_name
+
+    port_specs = instance.external_class.port_specs()
+    wire_spec = port_specs.get(port_name)
+    index = expr.args[2] if len(expr.args) > 2 else None
+
+    # Registered outputs behave like single-element arrays in the frontend.
+    # Verilog code should treat index 0 as the scalar signal itself.
+    if wire_spec is not None and wire_spec.kind == 'reg':
+        if index is not None:
+            idx_operand = unwrap_operand(index)
+            if isinstance(idx_operand, Const) and idx_operand.value == 0:
+                return f"{rval} = {inst_name}.{port_name}"
+            index_code = dumper.dump_rval(index, False)
+            return f"{rval} = {inst_name}.{port_name}[{index_code}]"
+        return f"{rval} = {inst_name}.{port_name}"
+
+    if index is not None:
+        index_code = dumper.dump_rval(index, False)
+        return f"{rval} = {inst_name}.{port_name}[{index_code}]"
+    return f"{rval} = {inst_name}.{port_name}"
+
+
 def codegen_pure_intrinsic(dumper, expr: PureIntrinsic) -> Optional[str]:
     """Generate code for pure intrinsic operations."""
     intrinsic = expr.opcode
     rval = dumper.dump_rval(expr, False)
 
-    if intrinsic in [PureIntrinsic.FIFO_VALID, PureIntrinsic.FIFO_PEEK]:
-        fifo = expr.args[0]
-        fifo_name = dumper.dump_rval(fifo, False)
-        if intrinsic == PureIntrinsic.FIFO_PEEK:
-            dumper.expose('expr', expr)
-            return f'{rval} = self.{fifo_name}'
-        if intrinsic == PureIntrinsic.FIFO_VALID:
-            return f'{rval} = self.{fifo_name}_valid'
-    if intrinsic == PureIntrinsic.VALUE_VALID:
-        value_expr = expr.operands[0].value
-        if value_expr.parent.module != expr.parent.module:
-            port_name = dumper.get_external_port_name(value_expr)
-            return f"{rval} = self.{port_name}_valid"
-        return f"{rval} = self.executed"
-
-    if intrinsic == PureIntrinsic.EXTERNAL_OUTPUT_READ:
-        instance = expr.args[0]  # ExternalIntrinsic
-        port_name = expr.args[1].value if hasattr(expr.args[1], 'value') else expr.args[1]
-
-        inst_name = dumper.external_instance_names.get(instance)
-        if inst_name is None:
-            inst_name = dumper.dump_rval(instance, False)
-            dumper.external_instance_names[instance] = inst_name
-
-        wire_spec = instance.external_class._wires.get(port_name)
-        index = expr.args[2] if len(expr.args) > 2 else None
-
-        # Registered outputs behave like single-element arrays in the frontend.
-        # Verilog code should treat index 0 as the scalar signal itself.
-        if wire_spec is not None and wire_spec.kind == 'reg':
-            if index is not None:
-                idx_operand = unwrap_operand(index)
-                if isinstance(idx_operand, Const) and idx_operand.value == 0:
-                    return f"{rval} = {inst_name}.{port_name}"
-                index_code = dumper.dump_rval(index, False)
-                return f"{rval} = {inst_name}.{port_name}[{index_code}]"
-            return f"{rval} = {inst_name}.{port_name}"
-
-        if index is not None:
-            index_code = dumper.dump_rval(index, False)
-            return f"{rval} = {inst_name}.{port_name}[{index_code}]"
-        return f"{rval} = {inst_name}.{port_name}"
+    for handler in (_handle_fifo_intrinsic, _handle_value_valid, _handle_external_output):
+        result = handler(dumper, expr, intrinsic, rval)
+        if result is not None:
+            return result
 
     raise ValueError(f"Unknown intrinsic: {expr}")
 
@@ -178,7 +199,7 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
     """
     rval = dumper.dump_rval(expr, False)
     ext_class = expr.external_class
-    metadata = getattr(ext_class, "_metadata", {})
+    metadata = ext_class.metadata()
     wrapper_name = dumper.external_wrapper_names.get(ext_class)
     if wrapper_name is None:
         wrapper_name = f"{ext_class.__name__}_ffi"

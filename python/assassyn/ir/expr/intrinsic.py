@@ -211,8 +211,7 @@ class PureIntrinsic(Expr):
             if len(self.args) > 2:  # Has index (RegOut)
                 idx = self.args[2].as_operand()
                 return f'{self.as_operand()} = {inst}.{port}[{idx}]'
-            else:  # No index (WireOut)
-                return f'{self.as_operand()} = {inst}.{port}'
+            return f'{self.as_operand()} = {inst}.{port}'
         raise NotImplementedError
 
     def __getattr__(self, name):
@@ -247,23 +246,25 @@ class ExternalIntrinsic(Intrinsic):
         self._external_class = external_class
         self._input_connections = input_connections
 
+        port_specs = external_class.port_specs()
+
         # Validate all required inputs are provided
-        for name, wire_spec in external_class._wires.items():
+        for name, wire_spec in port_specs.items():
             if wire_spec.direction == 'in':
                 assert name in input_connections, \
                     f"Missing required input '{name}' for {external_class.__name__}"
 
         # Validate no extra inputs
         for name in input_connections:
-            assert name in external_class._wires, \
+            assert name in port_specs, \
                 f"Unknown port '{name}' for {external_class.__name__}"
-            wire_spec = external_class._wires[name]
+            wire_spec = port_specs[name]
             assert wire_spec.direction == 'in', \
                 f"Port '{name}' is not an input port"
 
         # Store input values as operands for IR traversal
         operands = list(input_connections.values())
-        Expr.__init__(self, Intrinsic.EXTERNAL_INSTANTIATE, operands)
+        super().__init__(Intrinsic.EXTERNAL_INSTANTIATE, *operands)
 
     @property
     def external_class(self):
@@ -289,9 +290,10 @@ class ExternalIntrinsic(Intrinsic):
         Returns:
             The dtype of the specified output port
         """
-        assert port_name in self._external_class._wires, \
+        port_specs = self._external_class.port_specs()
+        assert port_name in port_specs, \
             f"Unknown port '{port_name}'"
-        wire_spec = self._external_class._wires[port_name]
+        wire_spec = port_specs[port_name]
         assert wire_spec.direction == 'out', \
             f"{port_name} is not an output port"
         return wire_spec.dtype
@@ -314,7 +316,8 @@ class ExternalIntrinsic(Intrinsic):
                 f"'{type(self).__name__}' object has no attribute '{name}'")
 
         # Check if it's a valid output port
-        wire_spec = self._external_class._wires.get(name)
+        port_specs = self._external_class.port_specs()
+        wire_spec = port_specs.get(name)
         if wire_spec is None:
             raise AttributeError(
                 f"Unknown port '{name}' in {self._external_class.__name__}")
@@ -331,7 +334,7 @@ class ExternalIntrinsic(Intrinsic):
                 return PureIntrinsic(PureIntrinsic.EXTERNAL_OUTPUT_READ, self, name)
             return _read()
 
-        elif wire_spec.kind == 'reg':
+        if wire_spec.kind == 'reg':
             # RegOut: return array proxy (will add index when accessed)
             # pylint: disable=import-outside-toplevel
             from ..module.external import _ExternalRegOutProxy

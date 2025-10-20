@@ -126,7 +126,8 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         comb_outputs = {}
         reg_outputs = {}
 
-        for port_name, wire_spec in ext_class._wires.items():
+        port_specs = ext_class.port_specs()
+        for port_name, wire_spec in port_specs.items():
             if wire_spec.direction == 'in':
                 inputs[port_name] = wire_spec
             elif wire_spec.direction == 'out':
@@ -137,7 +138,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
 
         # Generate struct with both current and next state for registers
         fd.write(f"#[derive(Clone)]\npub struct {cls_name}_FFI {{\n")
-        for port_name, wire_spec in ext_class._wires.items():
+        for port_name, wire_spec in port_specs.items():
             rust_type = dtype_to_rust_type(wire_spec.dtype)
             fd.write(f"    pub {port_name}: {rust_type},\n")
         # Add next-state fields for registered outputs
@@ -149,7 +150,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         fd.write(f"impl {cls_name}_FFI {{\n")
         fd.write("    pub fn new() -> Self {\n")
         fd.write(f"        {cls_name}_FFI {{\n")
-        for port_name in ext_class._wires:
+        for port_name in port_specs:
             fd.write(f"            {port_name}: Default::default(),\n")
         for port_name in reg_outputs:
             fd.write(f"            {port_name}_next: Default::default(),\n")
@@ -320,7 +321,7 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         # Check if this class has any registered outputs (kind='reg', direction='out')
         has_reg_out = any(
             wire.direction == 'out' and wire.kind == 'reg'
-            for wire in ext_class._wires.values()
+            for wire in ext_class.port_specs().values()
         )
         if has_reg_out:
             instance_uid = intr.uid

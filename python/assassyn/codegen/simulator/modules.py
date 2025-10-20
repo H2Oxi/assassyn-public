@@ -24,6 +24,7 @@ class ElaborateModule(Visitor):  # pylint: disable=too-many-instance-attributes
 
     def __init__(self, sys):
         super().__init__()
+        self.sys = sys
         self.indent = 0
         self.module_name = ""
         self.module_ctx = None
