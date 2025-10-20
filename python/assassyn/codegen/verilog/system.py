@@ -45,7 +45,10 @@ def generate_system(dumper, node):
         if body is None:
             continue
         for expr in dumper._walk_expressions(body):
-            if isinstance(expr, PureIntrinsic) and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ:
+            if (
+                isinstance(expr, PureIntrinsic)
+                and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ
+            ):
                 instance_operand = expr.args[0]
                 instance = unwrap_operand(instance_operand)
                 owner_module = getattr(getattr(instance, 'parent', None), 'module', None)

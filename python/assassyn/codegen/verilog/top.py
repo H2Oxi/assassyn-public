@@ -106,8 +106,10 @@ def generate_top_harness(dumper):
 
     for arr_container in dumper.sys.arrays:
         arr = arr_container
-        is_sram_array = any(isinstance(m, SRAM) and
-                           m._payload == arr for m in dumper.sys.downstreams)  # pylint: disable=protected-access
+        is_sram_array = any(
+            isinstance(m, SRAM) and m._payload == arr  # pylint: disable=protected-access
+            for m in dumper.sys.downstreams
+        )
         if is_sram_array:
             continue
         arr_name = namify(arr.name)
@@ -294,8 +296,8 @@ def generate_top_harness(dumper):
     def _attach_external_values(module, port_map, handled_ports):
         local_ports = set()
         for ext_val in module.externals:
-            if (isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const)
-                    or isinstance(ext_val, ExternalIntrinsic)):
+            if isinstance(ext_val, (Bind, ExternalIntrinsic)) or isinstance(
+                    unwrap_operand(ext_val), Const):
                 continue
 
             producer_module = getattr(ext_val.parent, 'module', None)

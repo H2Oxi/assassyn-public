@@ -153,15 +153,12 @@ def _handle_external_output(dumper, expr, intrinsic, rval):
     instance = unwrap_operand(instance_operand)
     port_operand = expr.args[1]
     port_name = port_operand.value if hasattr(port_operand, 'value') else port_operand
-
     index_operand = expr.args[2] if len(expr.args) > 2 else None
 
-    # Check if this is a cross-module access
+    result = None
     instance_owner = dumper.external_instance_owners.get(instance)
     if instance_owner and instance_owner != dumper.current_module:
-        # Cross-module access: use the exposed port value
-        # The EXTERNAL_OUTPUT_READ expression itself should have been exposed
-        # and will be provided as an input port to this module
+        # Cross-module access: use the exposed port value provided on inputs.
         port_name_for_read = dumper.get_external_port_name(expr)
         wire_key = dumper.get_external_wire_key(instance, port_name, index_operand)
         assignment_key = (dumper.current_module, wire_key)
@@ -173,30 +170,34 @@ def _handle_external_output(dumper, expr, intrinsic, rval):
                 'expr': expr,
                 'wire': wire_key,
             })
-        return f"{rval} = self.{port_name_for_read}"
+        result = f"{rval} = self.{port_name_for_read}"
+    else:
+        inst_name = dumper.external_instance_names.get(instance)
+        if inst_name is None:
+            inst_name = dumper.dump_rval(instance, False)
+            dumper.external_instance_names[instance] = inst_name
 
-    inst_name = dumper.external_instance_names.get(instance)
-    if inst_name is None:
-        inst_name = dumper.dump_rval(instance, False)
-        dumper.external_instance_names[instance] = inst_name
+        port_specs = instance.external_class.port_specs()
+        wire_spec = port_specs.get(port_name)
 
-    port_specs = instance.external_class.port_specs()
-    wire_spec = port_specs.get(port_name)
-    # Registered outputs behave like single-element arrays in the frontend.
-    # Verilog code should treat index 0 as the scalar signal itself.
-    if wire_spec is not None and wire_spec.kind == 'reg':
-        if index_operand is not None:
-            idx_operand = unwrap_operand(index_operand)
-            if isinstance(idx_operand, Const) and idx_operand.value == 0:
-                return f"{rval} = {inst_name}.{port_name}"
-            index_code = dumper.dump_rval(index_operand, False)
-            return f"{rval} = {inst_name}.{port_name}[{index_code}]"
-        return f"{rval} = {inst_name}.{port_name}"
+        if wire_spec is not None and wire_spec.kind == 'reg':
+            if index_operand is None:
+                result = f"{rval} = {inst_name}.{port_name}"
+            else:
+                idx_operand = unwrap_operand(index_operand)
+                if isinstance(idx_operand, Const) and idx_operand.value == 0:
+                    result = f"{rval} = {inst_name}.{port_name}"
+                else:
+                    index_code = dumper.dump_rval(index_operand, False)
+                    result = f"{rval} = {inst_name}.{port_name}[{index_code}]"
+        else:
+            if index_operand is None:
+                result = f"{rval} = {inst_name}.{port_name}"
+            else:
+                index_code = dumper.dump_rval(index_operand, False)
+                result = f"{rval} = {inst_name}.{port_name}[{index_code}]"
 
-    if index_operand is not None:
-        index_code = dumper.dump_rval(index_operand, False)
-        return f"{rval} = {inst_name}.{port_name}[{index_code}]"
-    return f"{rval} = {inst_name}.{port_name}"
+    return result
 
 
 def codegen_pure_intrinsic(dumper, expr: PureIntrinsic) -> Optional[str]:
@@ -244,7 +245,11 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
         exposures = dumper.external_output_exposures[dumper.current_module]
         seen_keys = set()
         for entry in entries:
-            wire_key = dumper.get_external_wire_key(expr, entry['port_name'], entry['index_operand'])
+            wire_key = dumper.get_external_wire_key(
+                expr,
+                entry['port_name'],
+                entry['index_operand'],
+            )
             if wire_key in seen_keys:
                 continue
             seen_keys.add(wire_key)
