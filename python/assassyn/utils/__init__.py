@@ -77,9 +77,88 @@ def patch_fifo(file_path):
             f.write(new_content)
 
 
-def run_simulator(manifest_path, offline=False, release=True):
-    '''The helper function to run the simulator'''
+def get_simulator_binary_path(manifest_path):
+    '''Get the path to the compiled simulator binary.
 
+    Args:
+        manifest_path: Path to Cargo.toml
+
+    Returns:
+        str: Path to the compiled binary
+    '''
+    try:
+        # Python 3.11+ has tomllib in the standard library
+        import tomllib
+    except ImportError:
+        # Fallback to toml package for Python < 3.11
+        import toml as tomllib  # type: ignore
+
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    # Parse Cargo.toml to get package name
+    with open(manifest_path, 'rb') as f:
+        cargo_toml = tomllib.load(f)
+
+    package_name = cargo_toml['package']['name']
+
+    # Check if CARGO_TARGET_DIR is set (used by the build system)
+    cargo_target_dir = os.environ.get('CARGO_TARGET_DIR')
+    if cargo_target_dir:
+        binary_path = os.path.join(cargo_target_dir, 'release', package_name)
+    else:
+        binary_path = os.path.join(manifest_dir, 'target', 'release', package_name)
+
+    return binary_path
+
+
+def build_simulator(manifest_path, offline=False):
+    '''Build the simulator binary using cargo build.
+
+    Args:
+        manifest_path: Path to Cargo.toml
+        offline: Whether to use offline mode
+
+    Returns:
+        str: Path to the compiled binary
+    '''
+    def _build(off):
+        cmd = ['cargo', 'build', '--release', '--manifest-path', manifest_path]
+        if off:
+            cmd += ['--offline']
+        print(cmd)
+        _cmd_wrapper(cmd)
+
+    try:
+        _build(offline)
+    except subprocess.CalledProcessError as err:
+        if offline:
+            raise
+        try:
+            _build(True)
+        except subprocess.CalledProcessError as retry_err:
+            raise err from retry_err
+
+    return get_simulator_binary_path(manifest_path)
+
+
+def run_simulator(manifest_path=None, offline=False, release=True, binary_path=None):
+    '''The helper function to run the simulator.
+
+    Args:
+        manifest_path: Path to Cargo.toml (used if binary_path is None)
+        offline: Whether to use offline mode
+        release: Whether to use release mode
+        binary_path: Path to compiled binary (if provided, run directly)
+
+    Returns:
+        str: Output from the simulator
+    '''
+    if binary_path is not None:
+        # Run the binary directly
+        print([binary_path])
+        return _cmd_wrapper([binary_path])
+
+    # Fall back to cargo run
     def _run(off):
         cmd = ['cargo', 'run', '--manifest-path', manifest_path]
         if off:
@@ -171,6 +250,7 @@ __all__ = [
     'enforce_type', 'validate_arguments', 'check_type',
     # Existing utilities
     'identifierize', 'unwrap_operand', 'repo_path', 'package_path',
-    'patch_fifo', 'run_simulator', 'run_verilator', 'parse_verilator_cycle',
+    'patch_fifo', 'run_simulator', 'build_simulator', 'get_simulator_binary_path',
+    'run_verilator', 'parse_verilator_cycle',
     'parse_simulator_cycle', 'has_verilator', 'create_dir', 'namify'
 ]

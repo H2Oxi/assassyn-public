@@ -465,8 +465,8 @@ def build_cpu(depth_log):
         )
 
         memory_access.build(
-            writeback = writeback, 
-            mem_bypass_reg = mem_bypass_reg, 
+            writeback = writeback,
+            mem_bypass_reg = mem_bypass_reg,
             mem_bypass_data=mem_bypass_data,
             wb_bypass_reg=wb_bypass_reg,
             wb_bypass_data=wb_bypass_data,
@@ -477,7 +477,7 @@ def build_cpu(depth_log):
         on_br = decoder.build(executor=executor,rdata=icache.dout)
 
         fetcher_impl.build(on_br, exec_br_dest, ex_valid, pc_reg,
-                            pc_addr, decoder, 
+                            pc_addr, decoder,
                               depth_log, d_br_buffer , exec_br_jumped ,
                               mem_br_no_jump,exec_br_jump,icache)
 
@@ -500,7 +500,7 @@ def build_cpu(depth_log):
         sys.expose_on_top(offset_reg, kind='Inout')
         sys.expose_on_top(ex_valid, kind='Output')
 
-        
+
 
 
     print(sys)
@@ -514,11 +514,16 @@ def build_cpu(depth_log):
 
     simulator_path, verilog_path = elaborate(sys, **conf)
 
+    # Build the simulator binary once
+    print("Building simulator binary...")
+    simulator_binary = utils.build_simulator(simulator_path)
+    print(f"Simulator binary built: {simulator_binary}")
+
     # Return the built system and relevant components
-    return sys, simulator_path, verilog_path
+    return sys, simulator_binary, verilog_path
 
 
-def run_cpu(sys, simulator_path, verilog_path, workload='default'):
+def run_cpu(sys, simulator_binary, verilog_path, workload='default'):
     with sys:
         with open(f'{workspace}/workload.config') as f:
             raw = f.readline()
@@ -532,13 +537,13 @@ def run_cpu(sys, simulator_path, verilog_path, workload='default'):
     report = False
 
     if report:
-        raw = utils.run_simulator(simulator_path, False)
+        raw = utils.run_simulator(binary_path=simulator_binary, offline=False)
         open(f'{workload}.log', 'w').write(raw)
         #open(f'{workload}.sim.time', 'w').write(str(tt))
         raw = utils.run_verilator(verilog_path)
         open(f'{workload}.verilog.log', 'w').write(raw)
     else:
-        raw = utils.run_simulator(simulator_path)
+        raw = utils.run_simulator(binary_path=simulator_binary)
         open('raw.log', 'w').write(raw)
         check()
         raw = utils.run_verilator(verilog_path)
@@ -576,7 +581,7 @@ def init_workspace(base_path, case):
 
 if __name__ == '__main__':
     # Build the CPU Module only once
-    sys, simulator_path, verilog_path = build_cpu(depth_log=16)
+    sys, simulator_binary, verilog_path = build_cpu(depth_log=16)
     args = py_sys.argv[1:]
     print("minor-CPU built successfully!")
     # Define workloads
@@ -595,7 +600,7 @@ if __name__ == '__main__':
         for wl in workloads:
             # Copy workloads to tmp directory and rename to workload.
             init_workspace(wl_path, wl)
-            run_cpu(sys, simulator_path, verilog_path , wl)
+            run_cpu(sys, simulator_binary, verilog_path, wl)
         print("minor-CPU workloads ran successfully!")
 
         # ========================================================================================
@@ -636,11 +641,11 @@ if __name__ == '__main__':
         for case in test_cases:
             # Copy test cases to tmp directory and rename to workload.
             init_workspace(tests, case)
-            run_cpu(sys, simulator_path, verilog_path)
+            run_cpu(sys, simulator_binary, verilog_path)
         print("minor-CPU tests ran successfully!")
     else:
         # If user DID specify workloads, run exactly those, skipping default & tests:
         for wl in args:
             init_workspace(wl_path, wl)
-            run_cpu(sys, simulator_path, verilog_path, wl)
+            run_cpu(sys, simulator_binary, verilog_path, wl)
         print("Done running user-specified workload(s)!")
