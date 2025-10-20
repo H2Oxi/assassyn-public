@@ -1,6 +1,6 @@
 """Node reference dumper for simulator code generation."""
 
-from .utils import int_imm_dumper_impl, fifo_name, dtype_to_rust_type
+from .utils import int_imm_dumper_impl, fifo_name
 from ...utils import unwrap_operand, namify
 from ...ir.expr import Expr
 from ...ir.array import Array

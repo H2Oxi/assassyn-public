@@ -5,7 +5,7 @@ from __future__ import annotations
 # pylint: disable=duplicate-code,too-few-public-methods
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Generic, TypeVar, Literal
+from typing import Any, Dict, Generic, TypeVar, Literal
 
 
 T = TypeVar('T')
@@ -47,7 +47,6 @@ class WireIn(Generic[T]):
     Usage:
         a: WireIn[UInt(32)]
     """
-    pass
 
 
 class WireOut(Generic[T]):
@@ -56,7 +55,6 @@ class WireOut(Generic[T]):
     Usage:
         c: WireOut[UInt(32)]
     """
-    pass
 
 
 class RegOut(Generic[T]):
@@ -65,7 +63,6 @@ class RegOut(Generic[T]):
     Usage:
         reg_out: RegOut[Bits(32)]
     """
-    pass
 
 
 class _ExternalRegOutProxy:
@@ -155,15 +152,15 @@ def external(cls):
         elif origin is RegOut:
             wires[name] = WireSpec(name, dtype, 'out', 'reg')
 
-    cls._wires = wires
+    cls.set_port_specs(wires)
 
     # Extract metadata
-    cls._metadata = {
+    cls.set_metadata({
         'source': getattr(cls, '__source__', None),
         'module_name': getattr(cls, '__module_name__', cls.__name__),
         'has_clock': getattr(cls, '__has_clock__', False),
         'has_reset': getattr(cls, '__has_reset__', False),
-    }
+    })
 
     return cls
 
@@ -187,6 +184,25 @@ class ExternalSV(metaclass=ExternalSVMeta):
         result = ExternalAdder(a=value_a, b=value_b)  # Creates ExternalIntrinsic
         output = result.c  # Access output
     """
-
     _wires: Dict[str, WireSpec] = {}
-    _metadata: Dict[str, any] = {}
+    _metadata: Dict[str, Any] = {}
+
+    @classmethod
+    def set_port_specs(cls, wires: Dict[str, WireSpec]) -> None:
+        """Store the port specification table."""
+        cls._wires = wires
+
+    @classmethod
+    def set_metadata(cls, metadata: Dict[str, Any]) -> None:
+        """Store metadata for the external module."""
+        cls._metadata = metadata
+
+    @classmethod
+    def port_specs(cls) -> Dict[str, WireSpec]:
+        """Return the registered port specifications."""
+        return cls._wires
+
+    @classmethod
+    def metadata(cls) -> Dict[str, Any]:
+        """Return metadata dictionary for the external module."""
+        return cls._metadata

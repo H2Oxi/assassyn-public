@@ -1,8 +1,6 @@
 """Topological analysis utilities for Assassyn."""
 from collections import defaultdict, deque
 from ..ir.expr import Expr, FIFOPush, Bind
-from ..ir.module.downstream import Downstream
-from ..ir.module.external import ExternalSV
 
 
 def topo_downstream_modules(sys):
@@ -55,7 +53,7 @@ def get_upstreams(module):
     res = set()
 
     externals = getattr(module, 'externals', {})
-    for elem, operands in externals.items():
+    for elem, _ in externals.items():
         if not isinstance(elem, Expr):
             continue
 
