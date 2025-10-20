@@ -28,19 +28,19 @@ class ExternalRegister(ExternalSV):
 
 
 class Sink(Module):
-    
+
     def __init__(self):
         super().__init__(
             ports={
                 'a': Port(UInt(32)),
-                'b': Port(UInt(32)),
+                'b': Port(UInt(32))
             },
         )
 
     @module.combinational
-    def build(self , add_out: Array):
+    def build(self, reg: Array):
         a, b = self.pop_all_ports(True)
-        log("Sink received:  {} + {} = {}", a, b, add_out[0])
+        log("Sink received:  {} + {} = {}", a, b, reg[0])
 
 class Adder(Module):
 
@@ -61,9 +61,8 @@ class Adder(Module):
         log("Adder: {} + {} = {}", a, b, ext_adder.c)
 
         ex_reg = ExternalRegister(reg_in=ext_adder.c.bitcast(Bits(32)))
-
+        
         sink.async_called(a=a, b=b)
-        log("reg out: {}", ex_reg.reg_out[0])
 
         return ex_reg.reg_out
 
@@ -110,14 +109,14 @@ def test_complex_external():
     sys = SysBuilder('complex_external')
     with sys:
         sink = Sink()
+        
 
         adder = Adder()
-        reg_o = adder.build(sink)
-
-        sink.build(reg_o)
+        reg = adder.build(sink)
+        sink.build(reg)
 
         driver = Driver()
-        call = driver.build(adder)
+        driver.build(adder)
 
     print(sys)
 

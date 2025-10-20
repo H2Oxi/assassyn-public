@@ -68,9 +68,10 @@ This function generates Verilog code for pure intrinsic operations, which are si
    - Used to check if a value is valid in the current execution context
 
 4. **EXTERNAL_OUTPUT_READ**: Reads a port from an `ExternalIntrinsic`
-   - Ensures the external wrapper is instantiated and cached in `external_instance_names`
-   - Handles both single-bit wire outputs and indexed register outputs (`port[index]`)
-   - Returns a reference to the wrapper's exposed field (cloning index computations when needed)
+   - Unwraps the intrinsic operand so the dumper can associate it with its owning module
+   - Normalises cross-module accesses into a stable `(instance, port, index)` key that later passes use to declare shared wires exactly once
+   - For cross-module reads, records the consumer/producer relationship and returns the exposed input (`self.<producer>_<value>`)
+   - For local reads, ensures the external wrapper is instantiated and cached in `external_instance_names`, then emits either the raw signal or an indexed access (with index-0 treated as the scalar case)
 
 The function handles FIFO operations by generating appropriate signal references and managing the expose mechanism for peek operations.
 
@@ -78,6 +79,7 @@ The function handles FIFO operations by generating appropriate signal references
 - Understanding of [pure intrinsic operations](/python/assassyn/ir/expr/intrinsic.md)
 - Knowledge of [FIFO operations](/python/assassyn/ir/expr/array.md)
 - Understanding of [external port handling](/python/assassyn/codegen/verilog/design.md)
+- Awareness of the cross-module wiring pipeline documented in [system generation](/python/assassyn/codegen/verilog/system.md) and [cleanup](/python/assassyn/codegen/verilog/cleanup.md)
 - Reference to [right-hand value generation](/python/assassyn/codegen/verilog/rval.md)
 
 ### `codegen_intrinsic`

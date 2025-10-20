@@ -41,6 +41,7 @@ This module provides the main Verilog design generation functionality, including
 3. **Port Mapping**: External module ports are mapped to internal signals
 4. **Signal Routing**: External module signals are routed through the design
 5. **Co-simulation Support**: External modules are integrated for co-simulation
+6. **Cross-Module Output Tracking**: `CIRCTDumper` now tracks every cross-module read of an external register output via `cross_module_external_reads`, `external_outputs_by_instance`, and the normalised wire keys returned by `get_external_wire_key`, allowing downstream passes to declare data/valid ports exactly once per producer.
 
 **Credit-Based Pipeline Implementation Details:** The Verilog design generation implements the credit-based pipeline:
 
@@ -104,7 +105,7 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 1. **Execution Control**: `wait_until`, `cond_stack`, and `finish_conditions` track predicate stacking, wait-until clauses, and FINISH intrinsics.
 2. **Module State**: `current_module`, `_exposes`, `module_ctx`, and `exposed_ports_to_add` capture which values need to become ports.
 3. **Array Management**: `array_write_port_mapping`, `array_users`, `sram_payload_arrays`, and `memory_defs` orchestrate multi-port array writers and SRAM payloads.
-4. **External Integration**: `external_intrinsics`, `external_classes`, `external_wrapper_names`, `external_instance_names`, and `external_instance_owners` track how `ExternalIntrinsic` nodes map to wrapper modules and expose signals across modules.
+4. **External Integration**: `external_intrinsics`, `external_classes`, `external_wrapper_names`, `external_instance_names`, `external_instance_owners`, `cross_module_external_reads`, `external_outputs_by_instance`, and `external_output_exposures` track how `ExternalIntrinsic` nodes map to wrapper modules, which modules read each exposed register output, and the producer-side ports required to materialise those reads.
 5. **Expression Naming**: `expr_to_name` and `name_counters` guarantee deterministic signal names whenever expression results must be reused across statements.
 6. **Code Generation**: `code`, `logs`, and `indent` store emitted lines and diagnostic information used later by the testbench.
 
@@ -133,6 +134,8 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 **`get_pred`**: Generates the current execution predicate by combining all conditions in the condition stack
 
 **`get_external_port_name`**: Creates mangled port names for external values to avoid naming conflicts
+
+**`get_external_wire_key`**: Normalises `(instance, port, index)` access into a hashable key that downstream phases reuse when declaring wires or caching producer exposures, ensuring multi-reader scenarios do not duplicate ports or assignments.
 
 **Project-specific Knowledge Required**:
 - Understanding of [visitor pattern](/python/assassyn/ir/visitor.md)

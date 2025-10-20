@@ -4,7 +4,7 @@ This module provides post-generation cleanup utilities for Verilog code generati
 
 ## Summary
 
-The cleanup module is responsible for generating the final control signals and interconnections after the main Verilog code generation is complete. It handles complex signal routing for arrays, ports, modules, and memory interfaces, ensuring proper connectivity between generated modules according to the credit-based pipeline architecture.
+The cleanup module is responsible for generating the final control signals and interconnections after the main Verilog code generation is complete. It handles complex signal routing for arrays, ports, modules, and memory interfaces, ensuring proper connectivity between generated modules according to the credit-based pipeline architecture. As part of the external module flow, it also materialises producer-side `expose_*`/`valid_*` ports for any external register outputs that are consumed by another module, so cross-module reads can be wired up without duplicating logic.
 
 ## Exposed Interfaces
 
@@ -38,10 +38,11 @@ This is the main cleanup function that generates all the necessary control signa
 
 6. **Module Trigger Signal Generation**: When async calls target another module, sums all predicates (each converted to an 8-bit increment) and routes the result into `<callee>_trigger`.
 
-7. **External Exposure Generation**: For every exposed expression that must leave the module:
+7. **External Exposure Generation**: For every expression that must leave the module:
    - Appends `expose_<name>`/`valid_<name>` port declarations to `dumper.exposed_ports_to_add`.
    - Emits assignments that drive the value and its validity.
    - Skips raw `Wire` objects, because those are bridged through dedicated external wiring handled elsewhere.
+   - Emits additional `expose_<instance>_<port>` / `valid_<instance>_<port>` pairs for every external register output that is consumed by another module, using the cross-module metadata recorded earlier in the pipeline.
 
 8. **Bookkeeping**: Records `self.executed = executed_wire` as the last assignment, ensuring downstream consumers and the top-level harness can observe the execution result.
 

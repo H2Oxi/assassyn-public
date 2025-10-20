@@ -33,7 +33,7 @@ from ...ir.expr import (
     FIFOPush,
     AsyncCall,
 )
-from ...ir.expr.intrinsic import PureIntrinsic
+from ...ir.expr.intrinsic import PureIntrinsic, ExternalIntrinsic
 from ._expr import codegen_expr
 from .cleanup import cleanup_post_generation
 from .rval import dump_rval as dump_rval_impl
@@ -90,6 +90,9 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         self.external_wire_assignments = []
         self.external_wire_assignment_keys = set()
         self.external_wire_outputs = {}
+        self.cross_module_external_reads = []
+        self.external_outputs_by_instance = defaultdict(list)
+        self.external_output_exposures = defaultdict(dict)
         self.module_ctx = None
         self.external_wrapper_names = {}
         self.external_instance_names = {}
@@ -116,6 +119,17 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
             base_port_name = f"port{base_port_name}"
         port_name = f"{producer_name}_{base_port_name}"
         return port_name
+
+    def get_external_wire_key(self, instance, port_name, index_operand):
+        """Create a stable key for cross-module external output wiring."""
+        idx_key = None
+        if index_operand is not None:
+            idx_value = unwrap_operand(index_operand)
+            if isinstance(idx_value, Const):
+                idx_key = ('const', idx_value.value)
+            else:
+                idx_key = ('expr', idx_value)
+        return (instance, port_name, idx_key)
 
 
     # pylint: disable=protected-access
@@ -223,10 +237,17 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
         # Handle exposure logic for valued expressions that are externally used
         if expr.is_valued() and expr_externally_used(expr, True):
-            skip_exposure = (
-                isinstance(expr, PureIntrinsic)
-                and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ
-            )
+            # Skip exposure for ExternalIntrinsic - they should never be exposed as ports
+            skip_exposure = isinstance(expr, ExternalIntrinsic)
+
+            # For EXTERNAL_OUTPUT_READ, skip exposure only if the instance is in the same module
+            if isinstance(expr, PureIntrinsic) and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ:
+                instance = expr.args[0]  # The ExternalIntrinsic
+                instance_owner = self.external_instance_owners.get(instance)
+                # Skip exposure if the instance is in the current module
+                if instance_owner == self.current_module:
+                    skip_exposure = True
+
             if not skip_exposure and not isinstance(unwrap_operand(expr), Const):
                 self.expose('expr', expr)
 

@@ -27,6 +27,7 @@ This function generates the complete Verilog system by performing comprehensive 
 1. **System Analysis Phase**:
    - **SRAM Payload Identification**: Identifies SRAM payload arrays that need special handling.
    - **External Module Collection**: Harvests every `ExternalIntrinsic` in the system, records per-instance metadata, and generates PyCDE wrapper classes for each unique external class upfront.
+   - **Cross-Module External Reads**: Scans every module body for `PureIntrinsic.EXTERNAL_OUTPUT_READ` operations whose producer lives in a different module, storing both the consumer-facing entries (`cross_module_external_reads`) and the producer-facing grouping (`external_outputs_by_instance`).
 
 2. **Array Management Phase**:
    - **Write Port Assignment**: Assigns unique port indices to each module writing to an array, storing the mapping in `dumper.array_write_port_mapping`.
@@ -36,7 +37,7 @@ This function generates the complete Verilog system by performing comprehensive 
 3. **Module Analysis Phase**:
    - **Dependency Tracking**: Records downstream dependencies using `get_upstreams`.
    - **Async Call Analysis**: Fills `dumper.async_callees` so trigger counters can sum incoming credits.
-   - **External Wiring**: Records which exposed values flow across module boundaries so the top-level harness can declare and route the corresponding wires; legacy `external_wire_assignments` have been retired in favour of the intrinsic-driven bookkeeping.
+   - **External Wiring**: Records which exposed values flow across module boundaries so the top-level harness can declare and route the corresponding wires; legacy `external_wire_assignments` have been retired in favour of the intrinsic-driven bookkeeping, which now includes both consumer-side port declarations and producer-side exposure planning.
 
 4. **Module Generation Phase**:
    - **Regular Module Generation**: Skips pure external stubs and generates code for all remaining modules.
@@ -74,6 +75,9 @@ The function manages several CIRCTDumper state variables:
 - `sram_payload_arrays`: Set of arrays that are SRAM payloads
 - `external_intrinsics`: List of `ExternalIntrinsic` nodes encountered in the system
 - `external_classes`: Unique set of external classes that require PyCDE wrappers
+- `cross_module_external_reads`: Consumer-side records of external register outputs read from another module
+- `external_outputs_by_instance`: Producer-side grouping of the external outputs that must be exposed for other modules
+- `external_output_exposures`: Per-module cache populated during instantiation to drive `cleanup_post_generation`
 - `array_write_port_mapping`: Maps arrays to write port assignments
 - `downstream_dependencies`: Maps downstream modules to their dependencies
 - `async_callees`: Maps modules to their callers

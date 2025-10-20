@@ -2,8 +2,10 @@
 
 from ...ir.memory.sram import SRAM
 from ...ir.expr import AsyncCall, ArrayRead, ArrayWrite
+from ...ir.expr.intrinsic import PureIntrinsic
 from ...analysis import get_upstreams
 from ..simulator.external import collect_external_intrinsics
+from ...utils import unwrap_operand
 
 
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements,protected-access
@@ -23,11 +25,45 @@ def generate_system(dumper, node):
     external_intrinsics = collect_external_intrinsics(sys)
     dumper.external_intrinsics = external_intrinsics
     dumper.external_classes = []
+    dumper.cross_module_external_reads = []
+    dumper.external_outputs_by_instance.clear()
+    dumper.external_output_exposures.clear()
+
+    # Pre-populate external_instance_owners so cross-module references work
     for intrinsic in external_intrinsics:
+        owner_module = intrinsic.parent.module
+        dumper.external_instance_owners[intrinsic] = owner_module
+
         ext_class = intrinsic.external_class
         if ext_class not in dumper.external_classes:
             dumper.external_classes.append(ext_class)
             dumper._generate_external_module_wrapper(ext_class)
+
+    modules_to_scan = list(sys.modules) + list(sys.downstreams)
+    for module in modules_to_scan:
+        body = getattr(module, "body", None)
+        if body is None:
+            continue
+        for expr in dumper._walk_expressions(body):
+            if isinstance(expr, PureIntrinsic) and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ:
+                instance_operand = expr.args[0]
+                instance = unwrap_operand(instance_operand)
+                owner_module = getattr(getattr(instance, 'parent', None), 'module', None)
+                if owner_module is None or owner_module == module:
+                    continue
+                port_operand = expr.args[1]
+                port_name = port_operand.value if hasattr(port_operand, 'value') else port_operand
+                index_operand = expr.args[2] if len(expr.args) > 2 else None
+                entry = {
+                    'expr': expr,
+                    'producer': owner_module,
+                    'consumer': module,
+                    'instance': instance,
+                    'port_name': port_name,
+                    'index_operand': index_operand,
+                }
+                dumper.cross_module_external_reads.append(entry)
+                dumper.external_outputs_by_instance[instance].append(entry)
 
     for arr_container in sys.arrays:
         if arr_container in dumper.sram_payload_arrays:
