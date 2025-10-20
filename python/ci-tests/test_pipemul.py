@@ -107,8 +107,8 @@ def test_pipemul_external():
 
     raw = utils.run_simulator(simulator_path)
 
-    #if verilator_path:
-        #raw = utils.run_verilator(verilator_path)
+    if verilator_path:
+        raw = utils.run_verilator(verilator_path)
 
 
 if __name__ == '__main__':

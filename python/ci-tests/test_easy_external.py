@@ -80,7 +80,7 @@ def test_easy_external():
     raw = utils.run_simulator(simulator_path)
 
     if verilator_path:
-        #raw = utils.run_verilator(verilator_path)
+        raw = utils.run_verilator(verilator_path)
         assert "downstream:" in raw, "Expected log output not found"
 
 

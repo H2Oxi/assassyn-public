@@ -3,6 +3,7 @@
 from ...ir.memory.sram import SRAM
 from ...ir.expr import AsyncCall, ArrayRead, ArrayWrite
 from ...analysis import get_upstreams
+from ..simulator.external import collect_external_intrinsics
 
 
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements,protected-access
@@ -19,23 +20,14 @@ def generate_system(dumper, node):
         if isinstance(module, SRAM) and hasattr(module, '_payload'):
             dumper.sram_payload_arrays.add(module._payload)
 
-    # Collect external modules
-    dumper.external_modules = []
-    for module in sys.modules + sys.downstreams:
-        if dumper._is_external_module(module):
-            if module not in dumper.external_modules:
-                dumper.external_modules.append(module)
-        # Also check for external modules used within downstream modules
-        for expr in dumper._walk_expressions(module.body):
-            if isinstance(expr, AsyncCall):
-                callee = expr.bind.callee
-                if dumper._is_external_module(callee):
-                    if callee not in dumper.external_modules:
-                        dumper.external_modules.append(callee)
-
-    # Generate PyCDE wrapper classes for external modules first
-    for ext_module in dumper.external_modules:
-        dumper._generate_external_module_wrapper(ext_module)
+    external_intrinsics = collect_external_intrinsics(sys)
+    dumper.external_intrinsics = external_intrinsics
+    dumper.external_classes = []
+    for intrinsic in external_intrinsics:
+        ext_class = intrinsic.external_class
+        if ext_class not in dumper.external_classes:
+            dumper.external_classes.append(ext_class)
+            dumper._generate_external_module_wrapper(ext_class)
 
     for arr_container in sys.arrays:
         if arr_container in dumper.sram_payload_arrays:

@@ -10,9 +10,8 @@ from ...ir.memory.sram import SRAM
 from .utils import extract_sram_params
 
 from ...builder import SysBuilder
-from ...ir.module.external import ExternalSV
-
 from ...utils import create_dir, repo_path
+from ..simulator.external import collect_external_intrinsics
 
 
 def generate_sram_blackbox_files(sys, path, resource_base=None):
@@ -103,9 +102,11 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
     create_dir(path)
 
     external_sources = set()
-    for module in sys.modules + sys.downstreams:
-        if isinstance(module, ExternalSV) and getattr(module, 'file_path', None):
-            external_sources.add(module.file_path)
+    for intrinsic in collect_external_intrinsics(sys):
+        metadata = getattr(intrinsic.external_class, "_metadata", {})
+        source = metadata.get('source')
+        if source:
+            external_sources.add(source)
 
     external_file_names = sorted({Path(file_name).name for file_name in external_sources})
 

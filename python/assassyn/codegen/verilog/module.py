@@ -47,13 +47,19 @@ def generate_module_ports(dumper, node: Module, is_downstream: bool, is_sram: bo
     elif is_driver or node in dumper.async_callees:
         dumper.append_code('trigger_counter_pop_valid = Input(Bits(1))')
 
+    added_external_ports = set()
+
     for ext_val in node.externals:
         if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
             continue
         port_name = dumper.get_external_port_name(ext_val)
+        print(f"[verilog] module {node.name} external port {port_name} from {getattr(getattr(ext_val, 'parent', None), 'module', None)} expr={ext_val}")
+        if port_name in added_external_ports:
+            continue
         port_type = dump_type(ext_val.dtype)
         dumper.append_code(f'{port_name} = Input({port_type})')
         dumper.append_code(f'{port_name}_valid = Input(Bits(1))')
+        added_external_ports.add(port_name)
 
     if not is_downstream and not dumper._is_external_module(node):
         for i in node.ports:
