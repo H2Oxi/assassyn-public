@@ -18,8 +18,6 @@ from ....ir.expr import (
     Cast,
     Select,
     Select1Hot,
-    WireAssign,
-    WireRead,
 )
 from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic
 from ....ir.expr.call import Bind
@@ -43,8 +41,6 @@ from .array import (
 from .call import (
     codegen_async_call,
     codegen_bind,
-    codegen_wire_assign,
-    codegen_wire_read,
 )
 from .intrinsics import (
     codegen_pure_intrinsic,
@@ -70,8 +66,6 @@ _EXPR_CODEGEN_DISPATCH = {
     Bind: codegen_bind,
     Select1Hot: codegen_select1hot,
     Intrinsic: codegen_intrinsic,
-    WireAssign: codegen_wire_assign,
-    WireRead: codegen_wire_read,
 }
 
 

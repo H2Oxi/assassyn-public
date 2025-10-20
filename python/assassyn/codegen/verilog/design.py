@@ -32,8 +32,8 @@ from ...ir.expr import (
     ArrayWrite,
     FIFOPush,
     AsyncCall,
-    WireRead
 )
+from ...ir.expr.intrinsic import PureIntrinsic
 from ._expr import codegen_expr
 from .cleanup import cleanup_post_generation
 from .rval import dump_rval as dump_rval_impl
@@ -222,9 +222,12 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         body = codegen_expr(self, expr)
 
         # Handle exposure logic for valued expressions that are externally used
-        if expr.is_valued() and not isinstance(expr, WireRead) \
-                and expr_externally_used(expr, True):
-            if not isinstance(unwrap_operand(expr), Const):
+        if expr.is_valued() and expr_externally_used(expr, True):
+            skip_exposure = (
+                isinstance(expr, PureIntrinsic)
+                and expr.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ
+            )
+            if not skip_exposure and not isinstance(unwrap_operand(expr), Const):
                 self.expose('expr', expr)
 
         if body is not None:

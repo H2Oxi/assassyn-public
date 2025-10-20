@@ -26,7 +26,7 @@ This function generates the complete Verilog system by performing comprehensive 
 
 1. **System Analysis Phase**:
    - **SRAM Payload Identification**: Identifies SRAM payload arrays that need special handling.
-   - **External Module Collection**: Finds all external modules referenced by the design (including callees discovered through async calls) and generates PyCDE wrapper classes for them upfront.
+   - **External Module Collection**: Harvests every `ExternalIntrinsic` in the system, records per-instance metadata, and generates PyCDE wrapper classes for each unique external class upfront.
 
 2. **Array Management Phase**:
    - **Write Port Assignment**: Assigns unique port indices to each module writing to an array, storing the mapping in `dumper.array_write_port_mapping`.
@@ -36,7 +36,7 @@ This function generates the complete Verilog system by performing comprehensive 
 3. **Module Analysis Phase**:
    - **Dependency Tracking**: Records downstream dependencies using `get_upstreams`.
    - **Async Call Analysis**: Fills `dumper.async_callees` so trigger counters can sum incoming credits.
-   - **External Wiring**: As modules are visited, accumulates `external_wire_assignments` so cross-module wires can be connected later.
+   - **External Wiring**: Records which exposed values flow across module boundaries so the top-level harness can declare and route the corresponding wires; legacy `external_wire_assignments` have been retired in favour of the intrinsic-driven bookkeeping.
 
 4. **Module Generation Phase**:
    - **Regular Module Generation**: Skips pure external stubs and generates code for all remaining modules.
@@ -72,7 +72,8 @@ The function uses several analysis and utility functions:
 The function manages several CIRCTDumper state variables:
 
 - `sram_payload_arrays`: Set of arrays that are SRAM payloads
-- `external_modules`: List of external modules in the system
+- `external_intrinsics`: List of `ExternalIntrinsic` nodes encountered in the system
+- `external_classes`: Unique set of external classes that require PyCDE wrappers
 - `array_write_port_mapping`: Maps arrays to write port assignments
 - `downstream_dependencies`: Maps downstream modules to their dependencies
 - `async_callees`: Maps modules to their callers

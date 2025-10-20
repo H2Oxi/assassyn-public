@@ -19,7 +19,6 @@ from ...ir.expr import (
     AsyncCall,
     Bind,
     Intrinsic,
-    WireRead,
 )
 from ...ir.dtype import Record
 from ...utils import namify, unwrap_operand
@@ -297,14 +296,7 @@ def generate_top_harness(dumper):
             if isinstance(ext_val, Bind) or isinstance(unwrap_operand(ext_val), Const):
                 continue
 
-            if isinstance(ext_val, WireRead):
-                wire = getattr(ext_val, 'wire', None)
-                owner = getattr(wire, 'parent', None) if wire is not None else None
-                if owner is None and wire is not None:
-                    owner = getattr(wire, 'module', None)
-                producer_module = owner or getattr(ext_val.parent, 'module', None)
-            else:
-                producer_module = getattr(ext_val.parent, 'module', None)
+            producer_module = getattr(ext_val.parent, 'module', None)
 
             if producer_module is None:
                 continue

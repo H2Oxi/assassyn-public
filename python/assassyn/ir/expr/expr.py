@@ -108,20 +108,6 @@ class Expr(Value):
 
     def _is_cross_module_allowed(self, expr_operand: Expr) -> bool:
         '''Check whether we allow cross-module usage for the given expression'''
-        # Allow WireRead from ExternalSV
-        if isinstance(expr_operand, WireRead):
-            wire_owner = getattr(expr_operand.wire, 'module', None)
-            if wire_owner is None:
-                wire_owner = getattr(expr_operand.wire, 'parent', None)
-            if wire_owner is None:
-                return False
-
-            # Import locally to avoid circular dependency at module load time
-            #pylint: disable=import-outside-toplevel
-            from ..module.external import ExternalSV
-
-            return isinstance(wire_owner, ExternalSV)
-
         # Allow PureIntrinsic for external module output reads
         #pylint: disable=import-outside-toplevel
         from .intrinsic import PureIntrinsic, ExternalIntrinsic
@@ -185,7 +171,6 @@ class Expr(Value):
             Concat,
             Select,
             Select1Hot,
-            WireRead,
         )
         other = isinstance(self, valued)
         return other or self.is_binary() or self.is_unary()
@@ -368,57 +353,3 @@ class Select1Hot(Expr):
         cond = self.cond.as_operand()
         values = ', '.join(i.as_operand() for i in self.values)
         return f'{lval} = select_1hot {cond} ({values})'
-
-class WireAssign(Expr):
-    '''The class for wire assignment operations'''
-
-    WIRE_ASSIGN = 1100
-
-    def __init__(self, wire, value):
-        super().__init__(WireAssign.WIRE_ASSIGN, [wire, value])
-
-    @property
-    def wire(self):
-        '''Get the wire being assigned to'''
-        return self._operands[0]
-
-    @property
-    def value(self):
-        '''Get the value being assigned'''
-        return self._operands[1]
-
-    def __repr__(self):
-        return f'{self.wire.as_operand()} = {self.value.as_operand()}'
-
-@ir_builder
-def wire_assign(wire, value):
-    '''Create a wire assignment expression'''
-    return WireAssign(wire, value)
-
-
-class WireRead(Expr):
-    '''The class for reading from an external wire.'''
-
-    WIRE_READ = 1101
-
-    def __init__(self, wire):
-        super().__init__(WireRead.WIRE_READ, [wire])
-
-    @property
-    def wire(self):
-        '''Return the wire being read.'''
-        return self._operands[0]
-
-    @property
-    def dtype(self):
-        '''The data type carried by the wire.'''
-        return getattr(self.wire, 'dtype', None)
-
-    def __repr__(self):
-        return f'{self.as_operand()} = {self.wire.as_operand()}'
-
-
-@ir_builder
-def wire_read(wire):
-    '''Create a wire read expression.'''
-    return WireRead(wire)

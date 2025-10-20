@@ -18,7 +18,7 @@ This module generates Rust-based simulators from Assassyn systems. It implements
 
 ## Section 0. Summary
 
-The simulator generation process creates a complete Rust project that faithfully executes the high-level execution model of Assassyn hardware designs. The generated simulator implements the credit-based pipeline architecture where pipeline stages communicate through event queues and FIFOs, while downstream modules execute as pure combinational logic driven by upstream stage triggers. Beyond array port arbitration and DRAM simulation, the generator now wires in external SystemVerilog FFIs: it tracks value exposures needed by external modules, carries per-module handle structs inside the simulator state, and knows how to tick externally clocked peripherals alongside the internal register model.
+The simulator generation process creates a complete Rust project that faithfully executes the high-level execution model of Assassyn hardware designs. The generated simulator implements the credit-based pipeline architecture where pipeline stages communicate through event queues and FIFOs, while downstream modules execute as pure combinational logic driven by upstream stage triggers. Beyond array port arbitration and DRAM simulation, the generator now wires in external SystemVerilog FFIs by discovering `ExternalIntrinsic` nodes, auto-generating Rust structs per external class, and ticking those handles alongside the internal register model.
 
 ## Section 1. Exposed Interfaces
 
@@ -67,7 +67,7 @@ This function performs a comprehensive analysis of the Assassyn system to prepar
 **Half-Cycle Tick Mechanism:** The simulator implements a half-cycle tick mechanism:
 
 1. **Register Updates**: Registers are updated at the beginning of each cycle
-2. **External Clocking**: External SystemVerilog modules are clocked alongside internal registers
+2. **External Clocking**: `ExternalIntrinsic` instances are clocked alongside internal registers
 3. **DRAM Advancement**: DRAM interfaces are advanced every iteration
 4. **Timing Coordination**: All timing is coordinated through the main simulation loop
 
@@ -95,28 +95,30 @@ def dump_simulator(sys: SysBuilder, config, fd):
 
 This function generates the complete Rust simulator implementation by writing to the provided file descriptor. The generation process follows these steps:
 
-1. **System Analysis**: Calls `analyze_and_register_ports` to determine array-port requirements and collect DRAM modules. It also builds a lookup table of external FFI specs from `config.get("external_ffis", [])`.
+1. **System Analysis**: Calls `analyze_and_register_ports` to determine array-port requirements and collect DRAM modules. It also harvests every `ExternalIntrinsic` in the system so the simulator knows which external classes and instances must be materialised at runtime.
 
 2. **Import Generation**: Writes the Rust `use` statements required by the generated code (`sim_runtime`, `VecDeque`, `HashMap`, `SliceRandom`, dynamic library helpers, etc.).
 
-3. **Simulator Struct Generation**: Creates the main `Simulator` struct with fields for:
+3. **FFI Struct Synthesis**: For each unique external class referenced by an `ExternalIntrinsic`, emits a `<Class>_FFI` struct plus an `impl` block with `new`, `eval`, and (when needed) `clock_tick` methods. The generated methods are intentionally minimal placeholders—projects are expected to replace them with hand-written bindings once real FFIs are available.
+
+4. **Simulator Struct Generation**: Creates the main `Simulator` struct with fields for:
    - Global timestamp and `request_stamp_map_table` (used to pair DRAM responses with the issue stamp)
    - Per-DRAM `MemoryInterface` instances and `Response` buffers
    - Register arrays with ports sized according to the port manager
    - Module trigger flags, event queues, and FIFO buffers
-   - External FFI handles for every `ExternalSV` module that participates in co-simulation (recording which handles require clock ticks)
+   - One field per `ExternalIntrinsic` instance (e.g., `external_<uid>: <Class>_FFI`)
    - Optional `<expr>_value` slots for every IR value that must be visible outside its defining module (computed via `gather_expr_validities`)
 
-4. **Implementation Generation**: Generates the `impl Simulator` block with methods for:
-   - Constructor (`new`) that initialises DRAM interfaces, arrays, FIFOs, FFI handles, and expression caches
-   - `event_valid`, `reset_downstream`, `tick_registers`, and `reset_dram` helpers. `tick_registers` now also pulses any external handles that expose a clock tick API.
+5. **Implementation Generation**: Generates the `impl Simulator` block with methods for:
+   - Constructor (`new`) that initialises DRAM interfaces, arrays, FIFOs, external handles, and expression caches
+   - `event_valid`, `reset_downstream`, `tick_registers`, and `reset_dram` helpers. `tick_registers` now also pulses any external handles flagged with registered outputs.
 
-5. **Module Simulation Functions**: Emits `simulate_<module_name>` methods that:
+6. **Module Simulation Functions**: Emits `simulate_<module_name>` methods that:
    - Guard execution based on event queues or upstream triggers
    - Call into `modules::<module_name>` and interpret the boolean return (popping events on success, clearing exposed values on failure)
    - Track `triggered` flags so the top-level loop can detect activity
 
-6. **Main Simulation Loop**: Generates the `simulate()` function which:
+7. **Main Simulation Loop**: Generates the `simulate()` function which:
    - Instantiates `Simulator::new()` and initialises each DRAM interface with a configuration file
    - Builds vectors of stage and downstream simulation functions, optionally shuffling stage order when `config["random"]` is truthy
    - Seeds Driver/Testbench event queues, loads SRAM payloads from resource files, and honours `idle_threshold` when the design goes quiescent
@@ -129,7 +131,6 @@ This function generates the complete Rust simulator implementation by writing to
 - **`random`**: Boolean flag to randomize module execution order for better testing coverage
 - **`resource_base`**: Path to resource files (initialization files, configuration files)
 - **`fifo_depth`**: Default FIFO depth for pipeline stage communication
-- **`external_ffis`**: List of external SystemVerilog FFI specifications for co-simulation
 
 **Python-Rust Consistency Requirements:** The generated simulator must maintain consistency with the Python implementation:
 - **Data Type Mapping**: Assassyn data types are mapped to corresponding Rust types (UInt → u32/u64, Bits → bool, etc.)
@@ -137,7 +138,7 @@ This function generates the complete Rust simulator implementation by writing to
 - **FIFO Naming**: FIFO names follow the same convention as the Python implementation
 - **Module Execution**: Module execution order and timing must match the Python simulation model
 
-Configuration parameters such as `sim_threshold`, `idle_threshold`, `random`, `resource_base`, `fifo_depth`, and `external_ffis` flow from the `config` dictionary. The generated simulator continues to implement the credit-based pipeline architecture documented in [simulator.md](../../../docs/design/internal/simulator.md) while adding first-class support for co-simulated external modules.
+Configuration parameters such as `sim_threshold`, `idle_threshold`, `random`, `resource_base`, and `fifo_depth` flow from the `config` dictionary. The generated simulator continues to implement the credit-based pipeline architecture documented in [simulator.md](../../../docs/design/internal/simulator.md) while deriving external module support directly from the IR (no explicit FFI manifest required).
 
 ## Section 2. Internal Helpers
 

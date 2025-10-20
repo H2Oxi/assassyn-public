@@ -37,6 +37,7 @@ The class for intrinsic operations with side effects. These operations may have 
 - `BARRIER = 903` - Create a barrier in the execution flow
 - `SEND_READ_REQUEST = 906` - Send a read request to memory
 - `SEND_WRITE_REQUEST = 908` - Send a write request to memory
+- `EXTERNAL_INSTANTIATE = 913` - Instantiate and drive an external module (created implicitly by `ExternalSV` calls)
 
 **Fields:**
 - `opcode: int` - Operation code for this intrinsic
@@ -57,6 +58,7 @@ The class for pure intrinsic operations without side effects. These operations a
 - `FIFO_PEEK = 303` - Peek at FIFO data without consuming
 - `MODULE_TRIGGERED = 304` - Check if module is triggered
 - `VALUE_VALID = 305` - Check if value is valid
+- `EXTERNAL_OUTPUT_READ = 306` - Read an output port from an `ExternalIntrinsic`
 - `HAS_MEM_RESP = 904` - Check if memory has response
 - `GET_MEM_RESP = 912` - Get memory response data
 
@@ -164,6 +166,23 @@ Send a write request with address and data to the given memory system.
 **Explanation:**
 This intrinsic sends a write request to the specified memory module. If the write enable signal is not asserted, no request is sent. Returns a boolean indicating if the request was successfully sent.
 
+#### `class ExternalIntrinsic(Intrinsic)`
+
+Wrapper created automatically when calling an `ExternalSV` class. It records the external class, input connections, and exposes read-only accessors for output ports.
+
+**Key Behaviours:**
+- Input ports are passed positionally via keyword arguments, validated against the external class's `_wires` metadata.
+- Output ports are accessed using attribute syntax (`instance.port`). Wire outputs return a `PureIntrinsic(EXTERNAL_OUTPUT_READ)` node; register outputs return an `_ExternalRegOutProxy` that enforces index 0 and generates the same intrinsic under the hood.
+- The intrinsic's `uid` property is used by code generation to create stable handle names in both Verilog and the simulator.
+- The intrinsic returns `Bits(1)` to integrate with existing expose/validity tracking but its logical payload is the external module instance.
+
+#### `def external_instantiate(external_class, **inputs) -> ExternalIntrinsic`
+
+Frontend helper invoked by the `ExternalSV` metaclass; regular users simply call `MyExternalSV(a=x, b=y)`.
+
+**Explanation:**
+This intrinsic materialises an external module instance, wiring all declared inputs. Subsequent attribute accesses on the returned object yield `PureIntrinsic(EXTERNAL_OUTPUT_READ)` nodes or register proxies.
+
 #### `def get_mem_resp(mem) -> PureIntrinsic`
 
 Get the memory response data.
@@ -178,6 +197,13 @@ Get the memory response data.
 This pure intrinsic retrieves the response data from the specified memory module. The least significant bits contain the data payload, while the most significant bits contain the corresponding request address. For generality, the response data is in `Vec<8>` format.
 
 **Note on Memory Response Format:** The memory response data format is handled by the code generation system. In the Python implementation, the data is returned as a `Value` object that can be used in expressions. The actual data format conversion (e.g., from `Vec<8>` to `BigUint`) is handled during code generation to Rust.
+
+#### `def external_output_read(instance, port_name, index=None) -> PureIntrinsic`
+
+Thin wrapper used internally by `_ExternalRegOutProxy` and the attribute accessors on `ExternalIntrinsic`. Users normally obtain these by reading `instance.port` or `instance.port[idx]`.
+
+**Explanation:**
+Produces a pure intrinsic that references an external module output. When `index` is supplied, the intrinsic represents a register output access; otherwise it is a simple wire read. The dtype is derived from the external class metadata.
 
 **Error Conditions:**
 - Memory access errors: May occur if memory modules are not properly initialized

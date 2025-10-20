@@ -31,7 +31,7 @@ The topological analysis module provides functions for analyzing dependencies be
 2. **Graph Construction**: Builds a dependency graph using adjacency lists
 3. **Topological Sort**: Performs topological sorting using Kahn's algorithm
 4. **Cycle Detection**: Detects circular dependencies and raises ValueError
-5. **ExternalSV Handling**: Special handling for ExternalSV modules to avoid false cycles
+5. **External Module Handling**: Rekindles dependencies purely from `module.externals`, so no bespoke wire-assignment heuristics are needed.
 
 ## Section 1. Exposed Interfaces
 
@@ -75,7 +75,7 @@ This function identifies upstream modules that a given module depends on. It:
 1. **External Analysis**: Analyzes external dependencies of the module
 2. **Upstream Identification**: Identifies upstream modules from external references
 3. **Dependency Filtering**: Filters out certain types of dependencies
-4. **ExternalSV Handling**: Special handling for ExternalSV modules
+4. **External Module Handling**: Treats any expression found in `module.externals` as a potential dependency source
 5. **Result**: Returns set of upstream modules
 
 **Parameters:**
@@ -95,14 +95,9 @@ The module constructs dependency graphs using:
 3. **Dependency Addition**: Adds dependencies based on external references
 4. **Cycle Detection**: Detects cycles during topological sort
 
-### ExternalSV Special Handling
+### External Module Handling
 
-The module provides special handling for ExternalSV modules:
-
-1. **Assignment Filtering**: Filters out assignment-only dependencies
-2. **Wire Analysis**: Analyzes wire assignments for ExternalSV modules
-3. **Cycle Avoidance**: Avoids false cycles in ExternalSV dependencies
-4. **Owner Analysis**: Analyzes wire ownership for dependency determination
+Dependencies are derived from the expressions stored in `module.externals`. The analysis no longer inspects wire assignments directly; instead it trusts the IR builder to record any cross-module values in the externals list.
 
 ## Error Conditions
 

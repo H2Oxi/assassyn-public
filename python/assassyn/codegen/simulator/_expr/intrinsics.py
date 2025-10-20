@@ -52,7 +52,7 @@ def _codegen_get_mem_resp(node, module_ctx):
     return f"BigUint::from_bytes_le(&sim.{dram_name}_response.data)"
 
 
-def _codegen_external_output_read(node, module_ctx, sys, **_kwargs):
+def _codegen_external_output_read(node, module_ctx, **_kwargs):
     """Generate code for EXTERNAL_OUTPUT_READ intrinsic.
 
     This handles both WireOut (no index) and RegOut (with index) reads.
@@ -171,7 +171,7 @@ def _codegen_send_write_request(node, module_ctx):
                     }}"""
 
 
-def _codegen_external_instantiate(node, module_ctx, sys, **_kwargs):
+def _codegen_external_instantiate(node, module_ctx, **_kwargs):
     """Generate code for EXTERNAL_INSTANTIATE intrinsic.
 
     This handles the instantiation of external module instances.
@@ -183,7 +183,7 @@ def _codegen_external_instantiate(node, module_ctx, sys, **_kwargs):
 
     assignments = []
     for port_name, value in node.input_connections.items():
-        value_code = dump_rval_ref(module_ctx, sys, value)
+        value_code = dump_rval_ref(module_ctx, value)
         assignments.append(f"sim.{handle_name}.{port_name} = {value_code};")
 
     # Call eval() to compute outputs from inputs
@@ -210,7 +210,7 @@ def codegen_intrinsic(node: Intrinsic, module_ctx):
     """Generate code for intrinsic operations."""
     # Handle ExternalIntrinsic specially
     if isinstance(node, ExternalIntrinsic):
-        return _codegen_external_instantiate(node, module_ctx, sys, **kwargs)
+        return _codegen_external_instantiate(node, module_ctx)
 
     intrinsic = node.opcode
     codegen_func = _INTRINSIC_DISPATCH.get(intrinsic)

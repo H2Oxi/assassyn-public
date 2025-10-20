@@ -7,7 +7,7 @@
 ## Exposed Interfaces
 
 ```python
-class ExternalSV(Downstream): ...
+class ExternalSV: ...  # descriptor only; calling it yields an ExternalIntrinsic
 
 class WireIn(Generic[DType]): ...
 class WireOut(Generic[DType]): ...
@@ -21,9 +21,8 @@ class MyIP(ExternalSV):
     __source__ = "rtl/my_ip.sv"
     __module_name__ = "my_ip"
 
-ip = MyIP()
-ip.in_assign(a=value_a, b=value_b)
-result = ip.y  # or ip.y[0] for RegOut
+inst = MyIP(a=value_a, b=value_b)  # returns ExternalIntrinsic
+result = inst.y          # wire output → PureIntrinsic(EXTERNAL_OUTPUT_READ)
 ```
 
 -----
@@ -37,39 +36,24 @@ result = ip.y  # or ip.y[0] for RegOut
 
 ## @external Decorator
 
-  * The decorator validates that the class extends `ExternalSV`, walks `__annotations__`, and gathers all `WireIn`/`WireOut`/`RegOut` definitions into `_ExternalConfig`.
-  * Configuration fields such as `__source__`, `__module_name__`, `__has_clock__`, `__has_reset__`, and `__no_arbiter__` are captured so users can override them either on the subclass or at instantiation time.
-  * Getter/setter properties are installed lazily for each annotated attribute, enabling attribute-style access (`ext.y`) to read or drive wires.
+  * The decorator validates that the class extends `ExternalSV`, walks `__annotations__`, and gathers all `WireIn`/`WireOut`/`RegOut` definitions into the `_wires` metadata table.
+  * Configuration fields such as `__source__`, `__module_name__`, `__has_clock__`, and `__has_reset__` are captured so code generation stages can decide how to wrap and clock the external block.
+  * The decorated class remains callable; invoking it runs through the metaclass and returns an `ExternalIntrinsic` instead of a Python object. There is no longer a mutable Python instance that exposes setters/getters.
 
 -----
 
-## Directional Wire Views
+## ExternalSV Descriptor
 
-  * `DirectionalWires` exposes a dict-like API for inputs and outputs (`module.in_wires`, `module.out_wires`).
-  * Reads defer to `_ensure_output_exposed`, which uses the internal `_with_module_context()` helper to create a `wire_read` expression; registered outputs return an `_ExternalRegOutProxy` that enforces index `0`.
-  * Writes dispatch to `wire_assign` and update the underlying `Wire` so that subsequent IR traversal sees the same connection. Assignments can happen through `module.in_wires[...]`, direct attribute access, bracket syntax (`module['a'] = ...`), or the convenience wrapper `in_assign(...)`.
-  * **Performance optimization**: `DirectionalWires.__getitem__` checks `_connections_applied` flag before calling `_apply_pending_connections()`, avoiding redundant operations on subsequent accesses.
-
------
-
-## ExternalSV Class
-
-  * **Construction**: resolves decorator supplied defaults, requires a `file_path`, and records `external_module_name`, `has_clock`, `has_reset`, along with module attributes like `Module.ATTR_EXTERNAL`. Initializes performance flags `_connections_applied` and `_reads_harvested` to track state.
-  * **Wire Registration**: instantiates real `Wire` objects for every declared input/output, storing them in `self._wires`. Optional keyword arguments passed to the constructor are validated and queued until a builder context is available (`_apply_pending_connections`).
-  * **Context Management**: `_with_module_context()` provides a unified context manager for entering module/block context, eliminating code duplication and reducing invasiveness. It intelligently checks if context entry is needed and handles cleanup automatically.
-  * **IR Integration**: `in_assign()` uses `_with_module_context()` to safely drive inputs and return outputs. The method is significantly simplified (18 lines vs 35) while maintaining identical functionality. Output reads are memoized per wire to keep the generated IR minimal.
-  * **Performance Optimizations**:
-    - `_apply_pending_connections()` is idempotent via `_connections_applied` flag
-    - `_harvest_output_reads()` executes only once via `_reads_harvested` flag
-    - Both flags prevent redundant traversals and operations
-  * **Indexing Helpers**: `__getitem__` and `__setitem__` forward to the directional adapters, letting users treat the module like a small associative array of ports.
-  * **String Dump**: `__repr__` renders the external metadata, attached attributes, and the module body so debug dumps clearly mark external instantiations.
+  * **Construction**: The metaclass intercepts calls to the class and routes them to `_create_external_intrinsic`, which wraps the request in an `ExternalIntrinsic`.
+  * **Metadata**: `_wires` stores port declarations (direction + kind + dtype) while `_metadata` records auxiliary fields such as `module_name`, `source`, clock/reset booleans, etc. Downstream code generation stages read these tables directly.
+  * **No Mutable Instance**: The descriptor no longer inherits from `Downstream` or exposes mutation APIs like `in_assign`. All connectivity is described by the returned intrinsic and its operands.
+  * **Debugging Support**: `__repr__` is implemented on the Python side for better logging, but day-to-day interaction happens through the intrinsic nodes.
 
 -----
 
 ## Registered Outputs
 
-  * `_ExternalRegOutProxy` provides a read-only wrapper that mimics `RegArray` indexing semantics. It only accepts index `0`, returning the associated `wire_read` expression, and exposes the output `dtype` for convenience in type-sensitive code.
+  * `_ExternalRegOutProxy` provides a read-only wrapper that mimics `RegArray` indexing semantics. It only accepts index `0`, returning the associated `PureIntrinsic(EXTERNAL_OUTPUT_READ)` expression, and exposes the output `dtype` for convenience in type-sensitive code.
 
 -----
 
