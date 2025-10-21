@@ -92,31 +92,87 @@ Replaces all occurrences of 'fifo_n #(' with 'fifo #(' in the Top.sv.
 - `file_path`: Path to the Verilog file to patch
 
 **Explanation:**
-This function patches Verilog files by normalizing FIFO instantiations. It uses regex pattern `r'fifo_\d+\s*#\s*\('` 
-to find numbered FIFO instantiations and replaces them with the standard `fifo #(` format. This is used in the 
+This function patches Verilog files by normalizing FIFO instantiations. It uses regex pattern `r'fifo_\d+\s*#\s*\('`
+to find numbered FIFO instantiations and replaces them with the standard `fifo #(` format. This is used in the
 Verilator workflow to ensure consistent FIFO naming in generated Verilog code.
+
+### build_simulator
+
+```python
+def build_simulator(manifest_path: str, offline: bool = False) -> str
+```
+
+Build the simulator binary using cargo build.
+
+**Parameters:**
+- `manifest_path`: Path to the Cargo.toml manifest file
+- `offline`: Whether to run cargo in offline mode (default: False)
+
+**Returns:**
+- The path to the compiled binary executable
+
+**Explanation:**
+This function compiles the Rust-based simulator once using `cargo build --release`, returning the path to the
+compiled binary. It constructs the appropriate cargo build command with the provided manifest path and optional
+flags. If the initial build fails and `offline` was not explicitly requested, it retries automatically with
+`--offline` to support environments without network access. This is useful when you need to run the same
+simulator multiple times with different workloads - build once with this function, then use `run_simulator()`
+with `binary_path` parameter to run the binary directly without recompiling.
+
+### get_simulator_binary_path
+
+```python
+def get_simulator_binary_path(manifest_path: str) -> str
+```
+
+Get the path to the compiled simulator binary.
+
+**Parameters:**
+- `manifest_path`: Path to the Cargo.toml manifest file
+
+**Returns:**
+- The absolute path to the compiled binary executable
+
+**Explanation:**
+This function determines the path to the compiled simulator binary without building it. It parses the Cargo.toml
+file to extract the package name, then constructs the path to the binary in the cargo target directory. It
+respects the `CARGO_TARGET_DIR` environment variable if set (used by the build system), otherwise uses the
+default `target/release/` directory relative to the manifest. This function requires Python 3.11+ for the built-in
+`tomllib` module, or falls back to the `toml` package for earlier Python versions.
 
 ### run_simulator
 
 ```python
-def run_simulator(manifest_path: str, offline: bool = False, release: bool = True) -> str
+def run_simulator(manifest_path: str = None, offline: bool = False, release: bool = True, binary_path: str = None) -> str
 ```
 
 The helper function to run the simulator.
 
 **Parameters:**
-- `manifest_path`: Path to the Cargo.toml manifest file
+- `manifest_path`: Path to the Cargo.toml manifest file (optional, used if `binary_path` is None)
 - `offline`: Whether to run cargo in offline mode (default: False)
 - `release`: Whether to build in release mode (default: True)
+- `binary_path`: Path to a pre-compiled simulator binary (optional, for direct execution)
 
 **Returns:**
 - The simulator output as a string
 
 **Explanation:**
-This function executes the Rust-based simulator using cargo. It constructs the appropriate cargo command with 
-the provided manifest path and optional flags, prints the command being executed, and captures stdout. If the 
-initial invocation fails and `offline` was not explicitly requested, it retries automatically with `--offline` 
-to cover environments without network access.
+This function runs the Rust-based simulator in one of two modes:
+
+1. **Direct Binary Execution** (when `binary_path` is provided): Runs the pre-compiled binary directly without
+   invoking cargo. This is significantly faster for scenarios where you need to run the same simulator multiple
+   times with different workloads (e.g., testing multiple CPU workloads). Use `build_simulator()` first to
+   compile the binary once, then call this function with `binary_path` parameter for each run.
+
+2. **Cargo Run Mode** (when `binary_path` is None): Falls back to the traditional approach of using `cargo run`
+   with the provided manifest path. It constructs the appropriate cargo command with the provided flags, prints
+   the command being executed, and captures stdout. If the initial invocation fails and `offline` was not
+   explicitly requested, it retries automatically with `--offline` to cover environments without network access.
+
+**Performance Optimization:**
+For workloads that require running the simulator multiple times (e.g., `minor-cpu` with 30+ test cases), using
+the binary_path mode can dramatically reduce total execution time by eliminating redundant compilation overhead.
 
 ### run_verilator
 

@@ -86,6 +86,7 @@ def get_simulator_binary_path(manifest_path):
     Returns:
         str: Path to the compiled binary
     '''
+    # pylint: disable=import-outside-toplevel
     try:
         # Python 3.11+ has tomllib in the standard library
         import tomllib
