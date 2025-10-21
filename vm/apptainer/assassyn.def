@@ -5,13 +5,6 @@ From: /tmp/repo.sif
     /bin/zsh << ZSHEOF
 cd /app
 
-# Remove existing venv and create fresh one for container
-rm -rf /app/.assassyn-venv
-python3 -m venv /app/.assassyn-venv
-/app/.assassyn-venv/bin/pip install --upgrade pip
-/app/.assassyn-venv/bin/pip install build
-/app/.assassyn-venv/bin/pip install -r /app/python/requirements.txt
-
 # Source the virtual environment
 source /app/.assassyn-venv/bin/activate
 
@@ -23,12 +16,14 @@ export PATH="\$VERILATOR_ROOT/bin:\$PATH"
 export CARGO_TARGET_DIR="/app/.sim-runtime-cache"
 
 # Clean and rebuild components in correct order for Linux container
-make clean-wrapper
-make clean-ramulator2
-make clean-verilator
 make build-verilator
 make build-ramulator2
 make build-wrapper
+
+# Set fallback version for CIRCT setuptools-scm when git metadata is unavailable
+export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYCDE="0.0.0"
+SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYCDE="0.0.0" make install-circt
 
 # Add PyCDE to PYTHONPATH if it exists
 if [ -d "/app/3rd-party/circt/frontends/PyCDE/dist/lib" ]; then
@@ -41,12 +36,14 @@ export RUSTC_WRAPPER="\$RUSTC_WRAPPER"
 export ASSASSYN_HOME="\$ASSASSYN_HOME"
 export VERILATOR_ROOT="\$VERILATOR_ROOT"
 export PYTHONPATH="\$PYTHONPATH"
-export CC="ccache gcc"
-export CXX="ccache g++"
+export CC="gcc"
+export CXX="g++"
 export CCACHE_DIR="/tmp/ccache"
 export CARGO_HOME="/tmp/cargo"
 export VIRTUAL_ENV="/app/.assassyn-venv"
 export PATH="/app/.assassyn-venv/bin:\$VERILATOR_ROOT/bin:\$PATH"
+export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYCDE="0.0.0"
 EOF
 ZSHEOF
 
@@ -58,7 +55,16 @@ ZSHEOF
     echo "=== Testing builds ==="
     cd /app
     echo "Testing basic Python import..."
-    python -c 'import sys; print(f"Python {sys.version}")'
+    /app/.assassyn-venv/bin/python -c 'import sys; print(f"Python {sys.version}")'
+    
+    echo "Testing PyCDE import..."
+    if /app/.assassyn-venv/bin/python -c 'import pycde'; then
+        echo "✓ PyCDE import successful"
+    else
+        echo "✗ ERROR: PyCDE import failed"
+        exit 1
+    fi
+    
     echo "Testing Verilator installation..."
     if [ -x "/app/3rd-party/verilator/bin/verilator" ]; then
         /app/3rd-party/verilator/bin/verilator --version

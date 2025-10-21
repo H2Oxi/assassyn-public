@@ -128,17 +128,17 @@ def has_verilator():
         return VERILATOR_CACHE
 
     verilator_root = os.environ.get('VERILATOR_ROOT')
-    if not (verilator_root and os.path.isdir(verilator_root)):
+    if not verilator_root:
+        VERILATOR_CACHE = None
+        return VERILATOR_CACHE
+    if not os.path.isdir(verilator_root):
         VERILATOR_CACHE = None
         return VERILATOR_CACHE
 
-    env = os.environ.copy()
-    env.pop('RUSTC_WRAPPER', None)
     try:
         subprocess.run(
             [sys.executable, '-c', 'import pycde'],
             check=True,
-            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
