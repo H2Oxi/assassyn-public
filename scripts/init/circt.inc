@@ -57,40 +57,10 @@ install-pycde-wheel:
 		echo "PyCDE is already installed — skipping installation."; \
 		touch $(CURDIR)/3rd-party/circt/.circt-built; \
 	else \
-		echo "Installing PyCDE..."; \
-		echo "Step 1: Checking if PyCDE is already installed..."; \
-		if . .assassyn-venv/bin/activate && python -c "import pycde" 2>/dev/null; then \
-			echo "PyCDE is already installed — skipping installation."; \
-		else \
-			echo "PyCDE not found. Proceeding with installation..."; \
-			echo "Step 2: Attempting to install PyCDE via pip..."; \
-			if . .assassyn-venv/bin/activate && pip install pycde 2>/dev/null; then \
-				echo "PyCDE installed successfully via pip."; \
-			else \
-				echo "Failed to install PyCDE via pip. Proceeding to source installation..."; \
-				echo "Step 3: Building PyCDE from source..."; \
-				if ! (cd 3rd-party/circt/frontends/PyCDE && \
-					CIRCT_DIRECTORY="$$(pwd)/../../" CIRCT_EXTRA_CMAKE_ARGS="-DESI_RUNTIME=OFF -DZ3_DISABLE=ON -DOR_TOOLS_DISABLE=ON" \
-					. $$(pwd)/../../../../.assassyn-venv/bin/activate && python -m build); then \
-					echo "ERROR: Failed to build PyCDE from source."; \
-					exit 1; \
-				fi; \
-				echo "Installing PyCDE wheel..."; \
-				if ! (cd 3rd-party/circt/frontends/PyCDE && \
-					. $$(pwd)/../../../../.assassyn-venv/bin/activate && pip install --force-reinstall ./dist/*.whl); then \
-					echo "ERROR: Failed to install PyCDE wheel."; \
-					exit 1; \
-				fi; \
-				echo "PyCDE built and installed successfully from source."; \
-			fi; \
-		fi; \
-		echo "Step 4: Verifying PyCDE installation..."; \
-		if ! (. .assassyn-venv/bin/activate && python -c "import pycde; print('PyCDE version:', getattr(pycde, '__version__', 'unknown'))"); then \
-			echo "ERROR: PyCDE installation verification failed. pycde module cannot be imported."; \
-			exit 1; \
-		fi; \
-		echo "CIRCT installation completed successfully."; \
-		touch $(CURDIR)/$@; \
+		$(MAKE) check-wheel-exists && \
+		$(MAKE) install-pycde-wheel && \
+		$(MAKE) verify-pycde-installation && \
+		touch $(CURDIR)/3rd-party/circt/.circt-built; \
 	fi
 
 clean-circt:
