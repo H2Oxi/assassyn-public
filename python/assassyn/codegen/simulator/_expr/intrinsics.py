@@ -56,7 +56,8 @@ def _codegen_external_output_read(node, module_ctx, **_kwargs):
     """Generate code for EXTERNAL_OUTPUT_READ intrinsic.
 
     This handles both WireOut (no index) and RegOut (with index) reads.
-    Type information (wire vs reg) is available from the ExternalIntrinsic instance.
+    Uses Verilator FFI getter methods (get_<port>()).
+    Converts u8 to bool for Bits(1) types.
     """
     instance = node.args[0]  # ExternalIntrinsic
     port_name = node.args[1].value if hasattr(node.args[1], 'value') else node.args[1]
@@ -64,13 +65,21 @@ def _codegen_external_output_read(node, module_ctx, **_kwargs):
     # Optional: index parameter for RegOut (currently unused in codegen)
     # index = node.args[2] if len(node.args) > 2 else None
 
-    # Type info can be queried if needed in future:
-    # wire_spec = instance.external_class._wires[port_name]
-    # is_reg = (wire_spec.kind == 'reg')
-
     instance_uid = instance.uid
     handle_name = f"external_{instance_uid}"
-    return f"sim.{handle_name}.{port_name}.clone()"
+
+    # Get the port type to check if conversion is needed
+    port_specs = instance.external_class.port_specs()
+    wire_spec = port_specs.get(port_name)
+
+    getter_call = f"sim.{handle_name}.get_{port_name}()"
+
+    # Check if this is a Bits(1) port that needs u8 -> bool conversion
+    if wire_spec and hasattr(wire_spec.dtype, 'bits') and wire_spec.dtype.bits == 1:
+        # Verilator FFI returns u8, but simulator expects bool for Bits(1)
+        return f"({getter_call} != 0)"
+
+    return getter_call
 
 
 # Dispatch table for pure intrinsic operations
@@ -175,16 +184,27 @@ def _codegen_external_instantiate(node, module_ctx, **_kwargs):
     """Generate code for EXTERNAL_INSTANTIATE intrinsic.
 
     This handles the instantiation of external module instances.
-    The actual FFI struct fields are added elsewhere during simulator generation.
+    Uses Verilator FFI setter methods (set_<port>()).
+    Converts bool to u8 for Bits(1) types.
     """
     # For ExternalIntrinsic, we need to assign input values and call eval()
     instance_uid = node.uid
     handle_name = f"external_{instance_uid}"
 
+    # Get port specs to check types
+    port_specs = node.external_class.port_specs()
+
     assignments = []
     for port_name, value in node.input_connections.items():
         value_code = dump_rval_ref(module_ctx, value)
-        assignments.append(f"sim.{handle_name}.{port_name} = {value_code};")
+
+        # Check if this is a Bits(1) port that needs bool -> u8 conversion
+        wire_spec = port_specs.get(port_name)
+        if wire_spec and hasattr(wire_spec.dtype, 'bits') and wire_spec.dtype.bits == 1:
+            # Verilator FFI expects u8, but simulator uses bool for Bits(1)
+            value_code = f"({value_code} as u8)"
+
+        assignments.append(f"sim.{handle_name}.set_{port_name}({value_code});")
 
     # Call eval() to compute outputs from inputs
     assignments.append(f"sim.{handle_name}.eval();")

@@ -103,8 +103,20 @@ def collect_external_intrinsics(sys):
     return intrinsics
 
 
+def collect_external_classes(external_intrinsics):
+    """Return a mapping of unique ExternalSV classes referenced by intrinsics."""
+    classes: Dict[str, type] = {}
+    for intr in external_intrinsics:
+        external_class = getattr(intr, "external_class", None)
+        if external_class is None:
+            continue
+        classes.setdefault(external_class.__name__, external_class)
+    return classes
+
+
 __all__ = [
     "collect_external_intrinsics",
+    "collect_external_classes",
     "collect_module_value_exposures",
     "external_handle_field",
     "gather_expr_validities",

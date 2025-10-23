@@ -294,6 +294,20 @@ def _collect_ports(module: ExternalSV) -> tuple[List[FFIPort], List[FFIPort]]:
     return ports_in, ports_out
 
 
+def _collect_ports_from_class(external_class: type) -> tuple[List[FFIPort], List[FFIPort]]:
+    """Split class port specs into input and output ports for FFI generation."""
+    ports_in: List[FFIPort] = []
+    ports_out: List[FFIPort] = []
+    for name, wire_spec in external_class.port_specs().items():
+        port = _dtype_to_port(name, wire_spec)
+        # WireSpec uses 'in'/'out', not 'input'/'output'
+        if port.direction == "out":
+            ports_out.append(port)
+        else:
+            ports_in.append(port)
+    return ports_in, ports_out
+
+
 def _create_external_spec(
     module: ExternalSV,
     verilator_root: Path,
@@ -337,6 +351,67 @@ def _create_external_spec(
         has_clock=getattr(module, "has_clock", False),
         has_reset=getattr(module, "has_reset", False),
         original_module_name=module.name,
+    )
+
+
+def _create_external_spec_from_class(
+    external_class: type,
+    verilator_root: Path,
+    used_crate_names: Dict[str, int],
+    used_dynlib_names: Dict[str, int],
+) -> ExternalFFIModule:
+    """Create an ExternalFFIModule description from an ExternalSV class."""
+    metadata = external_class.metadata()
+    top_module = metadata.get("module_name")
+    if not top_module:
+        msg = (
+            f"ExternalSV class {external_class.__name__} "
+            "must specify '__module_name__'"
+        )
+        raise ValueError(msg)
+
+    file_path = metadata.get("source")
+    if not file_path:
+        msg = (
+            f"ExternalSV class {external_class.__name__} "
+            "must specify '__source__'"
+        )
+        raise ValueError(msg)
+
+    crate_name = _unique_name(
+        f"verilated_{_sanitize_base_name(top_module, external_class.__name__)}",
+        used_crate_names,
+    )
+    symbol_prefix = namify(crate_name)
+    dynamic_lib_name = namify(
+        _unique_name(f"{symbol_prefix}_ffi", used_dynlib_names)
+    )
+
+    crate_path = verilator_root / crate_name
+    crate_path.mkdir(parents=True, exist_ok=True)
+    (crate_path / "src").mkdir(exist_ok=True)
+    (crate_path / "rtl").mkdir(exist_ok=True)
+
+    src_sv_path = _ensure_repo_local_path(file_path)
+    if not src_sv_path.exists():
+        raise FileNotFoundError(f"ExternalSV file not found: {src_sv_path}")
+    shutil.copy(src_sv_path, crate_path / "rtl" / src_sv_path.name)
+
+    ports_in, ports_out = _collect_ports_from_class(external_class)
+
+    return ExternalFFIModule(
+        crate_name=crate_name,
+        crate_path=crate_path,
+        symbol_prefix=symbol_prefix,
+        dynamic_lib_name=dynamic_lib_name,
+        top_module=top_module,
+        sv_filename=src_sv_path.name,
+        sv_rel_path=os.path.join("rtl", src_sv_path.name),
+        inputs=ports_in,
+        outputs=ports_out,
+        has_clock=metadata.get("has_clock", False),
+        has_reset=metadata.get("has_reset", False),
+        original_module_name=external_class.__name__,
     )
 
 
@@ -722,6 +797,57 @@ def _build_verilator_library(crate: ExternalFFIModule) -> Path:
     return lib_path
 
 
+def _emit_crate_artifacts(spec: ExternalFFIModule) -> None:
+    """Generate crate sources and build the shared library for a spec."""
+    _write_file(spec.crate_path / "Cargo.toml", _generate_cargo_toml(spec))
+    _write_file(spec.crate_path / "src/lib.rs", _generate_lib_rs(spec))
+    _write_file(spec.crate_path / "src/wrapper.cpp", _generate_wrapper_cpp(spec))
+    _build_verilator_library(spec)
+
+
+def _write_manifest_file(
+    manifest_path: Path,
+    specs: List[ExternalFFIModule],
+    root: Path,
+) -> None:
+    """Write the manifest describing generated external modules."""
+    manifest = {"modules": [_spec_manifest_entry(spec, root) for spec in specs]}
+    _write_file(manifest_path, json.dumps(manifest, indent=2))
+
+
+def _record_used_name_hints(
+    specs: Iterable[ExternalFFIModule],
+    used_crate_names: Dict[str, int],
+    used_dynlib_names: Dict[str, int],
+) -> None:
+    """Record name prefixes to avoid clashes when creating additional specs."""
+    for spec in specs:
+        crate_base = spec.crate_name.replace("verilated_", "").rsplit("_", 1)[0]
+        used_crate_names[f"verilated_{crate_base}"] = 0
+        dynlib_base = spec.dynamic_lib_name.rsplit("_", 1)[0]
+        used_dynlib_names[dynlib_base] = 0
+
+
+def _generate_class_crates(
+    external_classes: Iterable[type],
+    verilator_root: Path,
+    used_crate_names: Dict[str, int],
+    used_dynlib_names: Dict[str, int],
+) -> List[ExternalFFIModule]:
+    """Create and build crates for ExternalSV classes referenced by intrinsics."""
+    specs: List[ExternalFFIModule] = []
+    for external_class in external_classes:
+        metadata = external_class.metadata()
+        if not metadata.get("source"):
+            continue
+        spec = _create_external_spec_from_class(
+            external_class, verilator_root, used_crate_names, used_dynlib_names
+        )
+        _emit_crate_artifacts(spec)
+        specs.append(spec)
+    return specs
+
+
 def generate_external_sv_crates(
     modules: Iterable[ExternalSV],
     simulator_root: Path,
@@ -739,22 +865,12 @@ def generate_external_sv_crates(
     for module in modules:
         if not getattr(module, "file_path", None):
             continue
-
         spec = _create_external_spec(module, verilator_root, used_crate_names, used_dynlib_names)
-        cargo_toml = _generate_cargo_toml(spec)
-        lib_rs = _generate_lib_rs(spec)
-        wrapper_cpp = _generate_wrapper_cpp(spec)
-
-        _write_file(spec.crate_path / "Cargo.toml", cargo_toml)
-        _write_file(spec.crate_path / "src/lib.rs", lib_rs)
-        _write_file(spec.crate_path / "src/wrapper.cpp", wrapper_cpp)
-
-        _build_verilator_library(spec)
+        _emit_crate_artifacts(spec)
         specs.append(spec)
 
     if specs:
-        manifest = {"modules": [_spec_manifest_entry(spec, simulator_root) for spec in specs]}
-        _write_file(simulator_root / "external_modules.json", json.dumps(manifest, indent=2))
+        _write_manifest_file(simulator_root / "external_modules.json", specs, simulator_root)
 
     return specs
 
@@ -766,20 +882,53 @@ def emit_external_sv_ffis(
     verilator_root: Path,
 ) -> List[ExternalFFIModule]:
     """Generate Verilator crates for ExternalSV modules and record their specs."""
+    # pylint: disable=import-outside-toplevel
+    from .external import collect_external_classes, collect_external_intrinsics
 
+    # Collect ExternalSV module instances
     modules = [
         module
         for module in getattr(sys_module, "modules", []) + getattr(sys_module, "downstreams", [])
         if isinstance(module, ExternalSV)
     ]
 
-    if not modules:
+    # Collect ExternalSV classes used by ExternalIntrinsics
+    external_intrinsics = collect_external_intrinsics(sys_module)
+    external_classes = collect_external_classes(external_intrinsics)
+
+    if not modules and not external_classes:
         shutil.rmtree(verilator_root, ignore_errors=True)
         sys_module._external_ffi_specs = {}  # pylint: disable=protected-access
         config["external_ffis"] = []
         return []
 
-    ffi_specs = generate_external_sv_crates(modules, simulator_path, verilator_root)
+    # Clean and prepare verilator root
+    shutil.rmtree(verilator_root, ignore_errors=True)
+    verilator_root.mkdir(parents=True, exist_ok=True)
+
+    ffi_specs = []
+    used_crate_names: Dict[str, int] = {}
+    used_dynlib_names: Dict[str, int] = {}
+
+    # Generate FFI crates for module instances
+    if modules:
+        module_specs = generate_external_sv_crates(modules, simulator_path, verilator_root)
+        ffi_specs.extend(module_specs)
+        _record_used_name_hints(module_specs, used_crate_names, used_dynlib_names)
+
+    # Generate FFI crates for ExternalSV classes
+    if external_classes:
+        class_specs = _generate_class_crates(
+            external_classes.values(),
+            verilator_root,
+            used_crate_names,
+            used_dynlib_names,
+        )
+        ffi_specs.extend(class_specs)
+
+    if ffi_specs:
+        _write_manifest_file(simulator_path / "external_modules.json", ffi_specs, simulator_path)
+
     sys_module._external_ffi_specs = {  # pylint: disable=protected-access
         spec.original_module_name: spec for spec in ffi_specs
     }

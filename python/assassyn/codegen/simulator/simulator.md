@@ -95,7 +95,7 @@ def dump_simulator(sys: SysBuilder, config, fd):
 
 This function generates the complete Rust simulator implementation by writing to the provided file descriptor. The generation process follows these steps:
 
-1. **System Analysis**: Calls `analyze_and_register_ports` to determine array-port requirements and collect DRAM modules. It also harvests every `ExternalIntrinsic` in the system so the simulator knows which external classes and instances must be materialised at runtime.
+1. **System Analysis**: Calls `analyze_and_register_ports` to determine array-port requirements and collect DRAM modules. It also harvests every `ExternalIntrinsic` in the system and then funnels that list through `collect_external_classes` so the simulator knows which external classes and instances must be materialised at runtime without duplicating crates.
 
 2. **Import Generation**: Writes the Rust `use` statements required by the generated code (`sim_runtime`, `VecDeque`, `HashMap`, `SliceRandom`, dynamic library helpers, etc.).
 

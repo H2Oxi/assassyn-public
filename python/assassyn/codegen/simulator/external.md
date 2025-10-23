@@ -22,7 +22,8 @@ During simulator generation we walk the elaborated IR to discover:
 - Which `ExternalSV` declarations elaborate to real bodies versus stub shells
   (`has_module_body` / `is_stub_external`)
 - Which `ExternalIntrinsic` instances appear in the design so that Rust fields
-  can be allocated in advance (`collect_external_intrinsics`)
+  can be allocated in advance (`collect_external_intrinsics`), along with the set
+  of distinct `ExternalSV` classes they reference (`collect_external_classes`)
 
 All of these helpers are intentionally lightweight wrappers over existing
 analyses so other simulator passes can share a consistent view of the IR.
@@ -79,6 +80,18 @@ def collect_external_intrinsics(sys):
 Walks the entire system and returns the `ExternalIntrinsic` instances that are
 present. Simulator code uses this list to allocate per-instance FFI state.
 
+### `collect_external_classes`
+
+```python
+def collect_external_classes(external_intrinsics) -> Dict[str, type]:
+```
+
+Post-processes the intrinsic list and collapses it to a mapping of unique
+`ExternalSV` classes. This allows downstream generators to request one Verilator
+crate per class even if multiple intrinsics reference the same external handle,
+and keeps name allocation consistent for both module instances and intrinsic
+users.
+
 ## Section 2. Internal Helpers
 
 ### `_ModuleValueExposureCollector`
@@ -95,4 +108,3 @@ traversal logic from `Visitor` to keep the implementation minimal.
 - The remaining helpers avoid unwrapping operands explicitly; `expr` objects are
   passed through as-is so other passes can decide how much information they
   need.
-

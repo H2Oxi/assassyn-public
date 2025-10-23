@@ -22,7 +22,12 @@ The module also provides Rust-facing metadata classes (`FFIPort`, `ExternalFFIMo
 def emit_external_sv_ffis(sys, config: dict[str, object], simulator_path: Path, verilator_root: Path) -> List[ExternalFFIModule]:
 ```
 
-Entry point used during simulator generation. It discovers all `ExternalSV` instances in the system, delegates crate creation to `generate_external_sv_crates`, caches the resulting specs on `sys._external_ffi_specs`, and stores the list in the simulator configuration (`config["external_ffis"]`).
+Entry point used during simulator generation. It discovers all `ExternalSV` usage in the system from two sources:
+
+1. **ExternalSV Module Instances**: Direct module instances in the system
+2. **ExternalIntrinsic References**: ExternalSV classes referenced through `ExternalIntrinsic` nodes
+
+For both cases, it generates Verilator FFI crates, caches the resulting specs on `sys._external_ffi_specs` indexed by class/module name, and stores the complete list in the simulator configuration (`config["external_ffis"]`). Name allocation for crates/dynamic libraries is coordinated via `_record_used_name_hints`, while `_generate_class_crates` and `_emit_crate_artifacts` ensure the same build path is reused for both module instances and intrinsic-only classes. This unified approach ensures all external modules use real Verilator-backed FFI regardless of how they are instantiated.
 
 ### `generate_external_sv_crates`
 
@@ -33,8 +38,7 @@ def generate_external_sv_crates(modules: Iterable[ExternalSV], simulator_root: P
 Materialises the crates on disk:
   * Removes any stale Verilator workspace.
   * Builds an `ExternalFFIModule` spec for each external block.
-  * Writes `Cargo.toml`, `src/lib.rs`, and `src/wrapper.cpp`.
-  * Runs Verilator and links the shared library.
+  * Delegates to `_emit_crate_artifacts` so file emission and native build logic stay centralised.
   * Emits `external_modules.json` summarising all specs.
 
 Returns the list of populated `ExternalFFIModule` records.
@@ -53,11 +57,30 @@ These types appear in `__all__`, making them available to other generator compon
 
 ### `_create_external_spec`
 
-Resolves filenames, allocates unique crate/library names, copies the SystemVerilog source, and populates the `ExternalFFIModule` dataclass. It also calls `_collect_ports` to partition wires into inputs and outputs.
+Resolves filenames, allocates unique crate/library names, copies the SystemVerilog source, and populates the `ExternalFFIModule` dataclass. It also calls `_collect_ports` to partition wires into inputs and outputs. This function works with `ExternalSV` **module instances**.
 
-### `_collect_ports` / `_dtype_to_port`
+### `_create_external_spec_from_class`
 
-Translate the `ExternalSV.wires` dictionary into `FFIPort` instances. Widths must be ≤ 64 bits—larger ports raise `NotImplementedError`. Signedness automatically selects the appropriate C and Rust scalar types.
+```python
+def _create_external_spec_from_class(external_class: type, verilator_root: Path, used_crate_names: Dict[str, int], used_dynlib_names: Dict[str, int]) -> ExternalFFIModule
+```
+
+Creates an `ExternalFFIModule` spec from an `ExternalSV` **class** (rather than an instance). This enables FFI generation for ExternalSV modules used through `ExternalIntrinsic`:
+
+1. Extracts metadata from `external_class.metadata()` to get `'source'` (file path) and `'module_name'` (SystemVerilog module name)
+2. Extracts port information from `external_class.port_specs()`
+3. Allocates unique crate and dynamic library names
+4. Copies the SystemVerilog source to the crate's `rtl/` directory
+5. Calls `_collect_ports_from_class` to partition ports into inputs and outputs
+6. Returns a fully populated `ExternalFFIModule` with the class name as `original_module_name`
+
+### `_collect_ports` / `_collect_ports_from_class` / `_dtype_to_port`
+
+**`_collect_ports`**: Translates the `ExternalSV.wires` dictionary (from module instances) into `FFIPort` instances.
+
+**`_collect_ports_from_class`**: Translates the class's `port_specs()` dictionary into `FFIPort` instances. Similar to `_collect_ports` but operates on the class-level port specifications.
+
+**`_dtype_to_port`**: Converts a single port (Wire or WireSpec) to an `FFIPort` instance. Widths must be ≤ 64 bits—larger ports raise `NotImplementedError`. Signedness automatically selects the appropriate C and Rust scalar types. Note that WireSpec uses `'in'`/`'out'` for direction, not `'input'`/`'output'`.
 
 ### `_generate_cargo_toml`, `_generate_lib_rs`, `_generate_wrapper_cpp`
 
@@ -65,6 +88,10 @@ Emit templated sources for the crate:
   * `Cargo.toml` depends on the shared `sim_runtime` crate (which re-exports `libloading`).
   * `src/lib.rs` produces a safe Rust wrapper with dynamic symbol loading, optional clock/reset helpers, and per-port setters/getters.
   * `src/wrapper.cpp` wraps the verilated model with a stable C ABI.
+
+### `_emit_crate_artifacts`
+
+Writes `Cargo.toml`, `src/lib.rs`, and `src/wrapper.cpp` for a given spec before invoking `_build_verilator_library`. Consolidating these steps keeps both `generate_external_sv_crates` and the class-based generation path in sync.
 
 ### `_build_verilator_library`
 
@@ -74,6 +101,18 @@ Runs the full native toolchain:
   3. Collects all generated C++ sources (`_gather_source_files`).
   4. Builds the shared library via `_build_compile_command` and `_run_subprocess`.
   5. Writes `.verilator-lib-path` so the Rust wrapper knows where to load the artifact.
+
+### `_write_manifest_file`
+
+Takes a manifest path plus a list of specs and rewrites the JSON summary in a single helper. This avoids duplicating the `json.dumps(..., indent=2)` call across the different generation entry points.
+
+### `_record_used_name_hints`
+
+Records the crate and dynamic-library name prefixes that were just generated. By retaining the base names in the `used_*` maps, later specs (e.g. from `ExternalIntrinsic` classes) pick unique suffixes without clobbering the instance-produced crates.
+
+### `_generate_class_crates`
+
+Iterates over the unique `ExternalSV` classes returned from `collect_external_classes`, calling `_create_external_spec_from_class` and `_emit_crate_artifacts` for each. The helper filters out classes lacking a `source` entry so headless stubs do not trigger failing builds.
 
 ### Naming Helpers
 
