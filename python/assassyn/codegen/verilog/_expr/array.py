@@ -43,6 +43,8 @@ def codegen_array_write(dumper, expr: ArrayWrite) -> Optional[str]:
 def codegen_fifo_push(dumper, expr: FIFOPush) -> Optional[str]:
     """Generate code for FIFO push operations."""
     dumper.expose('fifo', expr)
+    # Track pushes in module metadata to avoid redundant expression walking
+    dumper.module_metadata[dumper.current_module].pushes.append(expr)
 
 
 def codegen_fifo_pop(dumper, expr: FIFOPop) -> Optional[str]:
@@ -50,4 +52,6 @@ def codegen_fifo_pop(dumper, expr: FIFOPop) -> Optional[str]:
     rval = namify(expr.as_operand())
     fifo_name = dumper.dump_rval(expr.fifo, False)
     dumper.expose('fifo_pop', expr)
+    # Track pops in module metadata to avoid redundant expression walking
+    dumper.module_metadata[dumper.current_module].pops.append(expr)
     return f'{rval} = self.{fifo_name}'

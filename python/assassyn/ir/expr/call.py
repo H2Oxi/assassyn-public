@@ -34,6 +34,13 @@ class FIFOPush(Expr):
         '''Get the value to push'''
         return self._operands[1]
 
+    @property
+    def dtype(self):
+        '''Get the data type of this operation (Void for side-effect operations)'''
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import void
+        return void()
+
     def __repr__(self):
         handle = self.as_operand()
         return f'{self.fifo.as_operand()}.push({self.val.as_operand()}) // handle = {handle}'
@@ -49,8 +56,28 @@ class Bind(Expr):
     BIND = 501
 
     def _push(self, **kwargs):
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import RecordValue
+
         for k, v in kwargs.items():
-            push = getattr(self.callee, k).push(v)
+            port = getattr(self.callee, k)
+
+            # Handle RecordValue early: extract dtype and unwrap
+            if isinstance(v, RecordValue):
+                value_dtype = v.dtype  # Get Record type for checking
+                v = v.value()  # Unwrap to raw Bits now
+            else:
+                value_dtype = v.dtype
+
+            # Type check using the extracted dtype
+            if not port.dtype.type_eq(value_dtype):
+                raise ValueError(
+                    f"Type mismatch in Bind: port '{k}' expects type {port.dtype}, "
+                    f"but got value of type {value_dtype}"
+                )
+
+            # v is already unwrapped if it was RecordValue
+            push = port.push(v)
             push.bind = self
             self.pushes.append(push)
 
@@ -103,6 +130,13 @@ class Bind(Expr):
 
         return self
 
+    @property
+    def dtype(self):
+        '''Get the data type of this operation (Void for binding operations)'''
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import void
+        return void()
+
     def __repr__(self):
         args = []
         for v in self.pushes:
@@ -133,6 +167,13 @@ class AsyncCall(Expr):
     def bind(self) -> Bind:
         '''Get the bind operation'''
         return self._operands[0]
+
+    @property
+    def dtype(self):
+        '''Get the data type of this operation (Void for call operations)'''
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import void
+        return void()
 
     def __repr__(self):
         bind = self.bind.as_operand()

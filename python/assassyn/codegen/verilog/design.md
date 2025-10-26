@@ -108,14 +108,15 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 4. **External Integration**: `external_intrinsics`, `external_classes`, `external_wrapper_names`, `external_instance_names`, `external_instance_owners`, `cross_module_external_reads`, `external_outputs_by_instance`, and `external_output_exposures` track how `ExternalIntrinsic` nodes map to wrapper modules, which modules read each exposed register output, and the producer-side ports required to materialise those reads.
 5. **Expression Naming**: `expr_to_name` and `name_counters` guarantee deterministic signal names whenever expression results must be reused across statements.
 6. **Code Generation**: `code`, `logs`, and `indent` store emitted lines and diagnostic information used later by the testbench.
+7. **Module Metadata**: `module_metadata` maps each Module to its `PostDesignGeneration` metadata, tracking properties like whether the module contains FINISH intrinsics. This metadata is populated during module generation and consumed during top-level harness generation to avoid redundant expression walking. See [metadata module](/python/assassyn/codegen/verilog/metadata.md) for details.
 
 #### Key Methods
 
 **`visit_system`**: Generates code for the entire system by calling `generate_system()`
 
 **`visit_module`**: Generates a complete Verilog module with the following phases:
-1. **Analysis Phase**: Processes the module body, collecting exposes, async call metadata, and external wiring information.
-2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces, using the captured expose data.
+1. **Analysis Phase**: Processes the module body, collecting exposes, async call metadata, and external wiring information. During this phase, metadata for pushes and calls is collected incrementally as expressions are processed.
+2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces, using the captured expose data and the metadata lists (pushes/calls) instead of re-walking the module body.
 3. **Code Integration**: Combines the collected body statements with the module boilerplate and generator decorators.
 4. **Special Handling**: Resets external bookkeeping between modules, emits SRAM-specific prelude code, and avoids instantiating pure external stubs.
 

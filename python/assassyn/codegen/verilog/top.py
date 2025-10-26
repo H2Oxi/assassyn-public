@@ -14,11 +14,7 @@ from ...analysis import topo_downstream_modules
 from ...ir.module import Downstream
 from ...ir.memory.sram import SRAM
 from ...ir.expr import (
-    FIFOPush,
-    FIFOPop,
-    AsyncCall,
     Bind,
-    Intrinsic,
 )
 from ...ir.expr.intrinsic import ExternalIntrinsic
 from ...ir.dtype import Record
@@ -187,20 +183,21 @@ def generate_top_harness(dumper):
         module_fifo_depths[mod] = \
             {port: default_fifo_depth for port in getattr(mod, 'ports', [])}
 
+    # Use metadata-driven pushes to compute FIFO depths, avoiding expression walking
     for module in dumper.sys.modules + dumper.sys.downstreams:
-        if not module.body:
+        metadata = dumper.module_metadata.get(module)
+        if not metadata:
             continue
-        for expr in dumper._walk_expressions(module.body):
-            if isinstance(expr, FIFOPush):
-                fifo_port = expr.fifo
-                owner = fifo_port.module
-                if owner not in module_fifo_depths:
-                    continue
-                depth = getattr(expr, 'fifo_depth', None)
-                if not isinstance(depth, int) or depth <= 0:
-                    depth = default_fifo_depth
-                current = module_fifo_depths[owner].get(fifo_port, default_fifo_depth)
-                module_fifo_depths[owner][fifo_port] = max(current, depth)
+        for push in metadata.pushes:
+            fifo_port = push.fifo
+            owner = fifo_port.module
+            if owner not in module_fifo_depths:
+                continue
+            depth = push.fifo_depth
+            if not isinstance(depth, int) or depth <= 0:
+                depth = default_fifo_depth
+            current = module_fifo_depths[owner].get(fifo_port, default_fifo_depth)
+            module_fifo_depths[owner][fifo_port] = max(current, depth)
 
     for module in dumper.sys.modules:
         if dumper.is_stub_external(module):
@@ -382,8 +379,10 @@ def generate_top_harness(dumper):
                             f"{arr_name}_rdata{port_suffix}=aw_{arr_name}_rdata{port_suffix}"
                         )
 
-        pushes = [e for e in dumper._walk_expressions(module.body) if isinstance(e, FIFOPush)]
-        calls = [e for e in dumper._walk_expressions(module.body) if isinstance(e, AsyncCall)]
+        # Use metadata instead of walking expressions again
+        metadata = dumper.module_metadata.get(module)
+        pushes = metadata.pushes if metadata else []
+        calls = metadata.calls if metadata else []
 
         for p in pushes:
             # Store the actual Port object that is the target of a push
@@ -434,9 +433,10 @@ def generate_top_harness(dumper):
             connection_lines.append(
                 f"{mod_name}_trigger_counter_pop_ready.assign(inst_{mod_name}.executed)"
             )
+            metadata = dumper.module_metadata.get(module)
+            popped_fifos = {p.fifo for p in (metadata.pops if metadata else [])}
             for port in module_ports:
-                if any(isinstance(e, FIFOPop) and e.fifo == port
-                       for e in dumper._walk_expressions(module.body)):
+                if port in popped_fifos:
                     connection_lines.append(
                         f"fifo_{mod_name}_{namify(port.name)}_pop_ready"
                         f".assign(inst_{mod_name}.{namify(port.name)}_pop_ready)"
@@ -483,21 +483,13 @@ def generate_top_harness(dumper):
     finish_signals = []
     for module in instantiation_modules:
         mod_name = namify(module.name)
-        # Check if this module type has finish conditions
-        if hasattr(module, 'body'):
-            # Check if module contains FINISH intrinsics
-            has_finish = any(
-                isinstance(expr, Intrinsic) and expr.opcode == Intrinsic.FINISH
-                for expr in dumper._walk_expressions(module.body)
-            )
-            if has_finish:
-                finish_signals.append(f'inst_{mod_name}.finish')
+        # Check if this module type has finish conditions using metadata
+        metadata = dumper.module_metadata.get(module)
+        if metadata and metadata.has_finish:
+            finish_signals.append(f'inst_{mod_name}.finish')
 
     if finish_signals:
-        if len(finish_signals) == 1:
-            dumper.append_code(f'self.global_finish = {finish_signals[0]}')
-        else:
-            dumper.append_code(f'self.global_finish = {" | ".join(finish_signals)}')
+        dumper.append_code(f'self.global_finish = reduce(or_, [{", ".join(finish_signals)}])')
     else:
         dumper.append_code('self.global_finish = Bits(1)(0)')
 
@@ -530,10 +522,7 @@ def generate_top_harness(dumper):
                 f"inst_{namify(c.name)}.{mod_name}_trigger"
                 for c in callers_of_this_module
             ]
-            if len(trigger_terms) > 1:
-                summed_triggers = f"({' + '.join(trigger_terms)})"
-            else:
-                summed_triggers = trigger_terms[0]
+            summed_triggers = f"reduce(add, [{', '.join(trigger_terms)}])"
 
             dumper.append_code(
                 f"{mod_name}_trigger_counter_delta.assign({summed_triggers}.as_bits(8))"

@@ -5,7 +5,7 @@ This module contains functions to generate Verilog code for intrinsic operations
 including PureIntrinsic, Intrinsic, and Log.
 """
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from string import Formatter
 
 from ....ir.expr import Log
@@ -14,6 +14,9 @@ from ....ir.const import Const
 from ....ir.dtype import Int
 from ....ir.block import CondBlock, CycledBlock
 from ....utils import unwrap_operand, namify
+
+if TYPE_CHECKING:
+    from ..design import CIRCTDumper
 
 
 def codegen_log(dumper, expr: Log) -> Optional[str]:
@@ -255,6 +258,7 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
             seen_keys.add(wire_key)
             output_name = f"{rval}_{entry['port_name']}"
             dumper.external_wire_outputs[wire_key] = output_name
+            current_pred = dumper.get_pred()
             exposures.setdefault(wire_key, {
                 'output_name': output_name,
                 'dtype': entry['expr'].dtype,
@@ -262,7 +266,9 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
                 'port_name': entry['port_name'],
                 'index_operand': entry['index_operand'],
                 'index_key': wire_key[2],
+                'condition': current_pred,
             })
+
 
     return f"{rval} = {call}"
 
@@ -278,6 +284,8 @@ def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
     if intrinsic == Intrinsic.FINISH:
         predicate_signal = dumper.get_pred()
         dumper.finish_conditions.append((predicate_signal, "executed_wire"))
+        # Track that this module has a finish intrinsic for top-level generation
+        dumper.module_metadata[dumper.current_module].has_finish = True
         return None
     if intrinsic == Intrinsic.ASSERT:
         dumper.expose('expr', expr.args[0])
@@ -286,8 +294,6 @@ def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
         cond = dumper.dump_rval(expr.args[0], False)
         final_cond = cond
         dumper.wait_until = final_cond
-        return None
-    if intrinsic == Intrinsic.BARRIER:
         return None
     if intrinsic == Intrinsic.EXTERNAL_INSTANTIATE:
         # Should be handled by ExternalIntrinsic check above

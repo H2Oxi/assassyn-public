@@ -13,6 +13,8 @@ from ....ir.expr.call import Bind
 def codegen_async_call(dumper, expr: AsyncCall) -> Optional[str]:
     """Generate code for async call operations."""
     dumper.expose('trigger', expr)
+    # Track calls in module metadata to avoid redundant expression walking
+    dumper.module_metadata[dumper.current_module].calls.append(expr)
 
 
 def codegen_bind(_dumper, _expr: Bind) -> Optional[str]:

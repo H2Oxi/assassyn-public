@@ -35,9 +35,8 @@ jobs:
           echo "ramulator2-hash=$(git rev-parse HEAD:3rd-party/ramulator2)" >> $GITHUB_OUTPUT
 
       - name: Build All Components
-        if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss, building all components"
+          echo "Building all components"
           . setup.sh && make build-all
       
       - name: Run All Tests

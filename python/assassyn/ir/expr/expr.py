@@ -12,7 +12,7 @@ from ...utils import namify, identifierize
 
 if typing.TYPE_CHECKING:
     from ..array import Array
-    from ..module import Port, Module, Wire
+    from ..module import Port, Module
     from ..dtype import DType
     from ..block import Block, CondBlock
 
@@ -55,6 +55,7 @@ class Expr(Value):
         #pylint: disable=import-outside-toplevel,too-many-locals
         self.opcode = opcode
         self.loc = self.parent = None
+        self.name = None  # Initialize name attribute
         # NOTE: We only wrap values in Operand, not Ports or Arrays
         self._operands = []
         for operand in operands:
@@ -66,12 +67,12 @@ class Expr(Value):
         #pylint: disable=import-outside-toplevel
         from ..array import Array
         from ..const import Const
-        from ..module import Port, Wire, Module
+        from ..module import Port, Module
         from ..dtype import RecordValue
         from ...builder import Singleton
         from ..module.downstream import Downstream
 
-        if isinstance(operand, (Array, Port, Wire)):
+        if isinstance(operand, (Array, Port)):
             operand.users.append(self)
             return operand
 
@@ -134,11 +135,9 @@ class Expr(Value):
 
     def as_operand(self):
         '''Dump the expression as an operand'''
-        # Check if a meaningful name has been assigned by the naming system
-        # Use __dict__ directly to avoid triggering __getattr__
-        semantic_name_attr = '__assassyn_semantic_name__'
-        if semantic_name_attr in self.__dict__ and self.__dict__[semantic_name_attr] is not None:
-            return self.__dict__[semantic_name_attr]
+        # Use the name if assigned by the naming system
+        if self.name is not None:
+            return self.name
         return f'_{namify(identifierize(self))}'
 
     def is_binary(self):
@@ -214,6 +213,13 @@ class Log(Expr):
         super().__init__(Log.LOG, args)
         self.args = args
 
+    @property
+    def dtype(self):
+        '''Get the data type of this operation (Void for side-effect operations)'''
+        #pylint: disable=import-outside-toplevel
+        from ..dtype import void
+        return void()
+
     def __repr__(self):
         fmt = repr(self.args[0])
         return f'log({fmt}, {", ".join(i.as_operand() for i in self.args[1:])})'
@@ -249,7 +255,7 @@ class Concat(Expr):
 class Cast(Expr):
     '''The class for casting operation, including bitcast, zext, and sext.'''
 
-    dtype: DType  # Target data type
+    _dtype: DType  # Target data type
 
     BITCAST = 800
     ZEXT = 801
@@ -263,7 +269,12 @@ class Cast(Expr):
 
     def __init__(self, subcode, x, dtype):
         super().__init__(subcode, [x])
-        self.dtype = dtype
+        self._dtype = dtype
+
+    @property
+    def dtype(self) -> DType:
+        '''Get the target data type'''
+        return self._dtype
 
     @property
     def x(self) -> Value:

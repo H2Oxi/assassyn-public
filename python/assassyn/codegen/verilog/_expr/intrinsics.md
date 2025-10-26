@@ -1,6 +1,6 @@
 # Intrinsic Expression Generation
 
-This module provides Verilog code generation for intrinsic operations, including logging, pure intrinsics (FIFO operations, value validation, external output reads), and block intrinsics (finish, assert, wait_until, barrier, external instantiation).
+This module provides Verilog code generation for intrinsic operations, including logging, pure intrinsics (FIFO operations, value validation, external output reads), and block intrinsics (finish, assert, wait_until, external instantiation).
 
 ## Summary
 
@@ -95,6 +95,7 @@ This function generates Verilog code for block intrinsic operations, which are c
 
 1. **FINISH**: Signals that the module should finish execution
    - Adds the current predicate and execution signal to `finish_conditions`
+   - Sets the `has_finish` flag in the module's metadata (see [metadata module](/python/assassyn/codegen/verilog/metadata.md)) for top-level generation
    - Used to implement early termination of module execution
    - The cleanup phase combines all finish conditions with OR logic
 
@@ -107,11 +108,7 @@ This function generates Verilog code for block intrinsic operations, which are c
    - Used to control module execution timing in the credit-based architecture
    - The cleanup phase incorporates this into the execution signal
 
-4. **BARRIER**: Synchronization primitive (currently no-op)
-   - Returns `None` as barriers don't generate code in the current implementation
-   - Reserved for future synchronization features
-
-5. **EXTERNAL_INSTANTIATE / ExternalIntrinsic**: Creates and wires external modules in-line
+4. **EXTERNAL_INSTANTIATE / ExternalIntrinsic**: Creates and wires external modules in-line
    - `ExternalIntrinsic` instances are handled before the opcode switch, generating calls to `<wrapper>::new()` and wiring all inputs
    - Updates the dumper's bookkeeping (`external_instance_names`, `external_instance_owners`) so later passes can reference the external wrapper consistently
 

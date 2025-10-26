@@ -5,8 +5,8 @@ from __future__ import annotations
 import typing
 
 from ..builder import ir_builder, Singleton
-from .dtype import to_uint, RecordValue
-from .expr import ArrayRead, Expr,BinaryOp
+from .dtype import to_uint, RecordValue, ArrayType
+from .expr import ArrayRead, ArrayWrite, Expr,BinaryOp
 from .value import Value
 from ..utils import identifierize, namify
 from .expr.writeport import WritePort
@@ -95,7 +95,9 @@ def RegArray( #pylint: disable=invalid-name,too-many-arguments
                 # Use a generic 'array' suffix for unnamed arrays
                 hint = f"{context_prefix}_array"
 
-        manager.assign_name(res, hint)
+        # Only assign name if no explicit name was provided
+        if name is None:
+            manager.assign_name(res, hint)
 
     Singleton.builder.arrays.append(res)
 
@@ -120,21 +122,13 @@ class Array:  #pylint: disable=too-many-instance-attributes
     @property
     def name(self):
         '''The name of the array. If not set, a default name is generated.'''
-        semantic = getattr(self, '__assassyn_semantic_name__', None)
-        if isinstance(semantic, str) and semantic:
-            return semantic
         if self._name is not None:
             return self._name
         return f'array_{identifierize(self)}'
 
     @name.setter
     def name(self, name):
-        sanitized = namify(name)
-        self._name = sanitized
-        try:
-            setattr(self, '__assassyn_semantic_name__', sanitized)
-        except (AttributeError, TypeError):
-            pass
+        self._name = namify(name)
 
     def __init__(self, scalar_ty: DType, size: int, initializer: list):
         #pylint: disable=import-outside-toplevel
@@ -147,6 +141,11 @@ class Array:  #pylint: disable=too-many-instance-attributes
         self._name = None
         self._users = []
         self._write_ports = {}
+    @property
+    def dtype(self) -> ArrayType:
+        '''Get the data type of the array as an ArrayType.'''
+        return ArrayType(self.scalar_ty, self.size)
+
     @property
     def users(self):
         '''Get the users of the array.'''
@@ -170,25 +169,49 @@ class Array:  #pylint: disable=too-many-instance-attributes
         raise TypeError(f"Cannot AND Array with {type(other)}")
 
     def __repr__(self):
-        '''Enhanced repr to show write port information'''
-        res = f'array {self.name}[{self.scalar_ty}; {self.size}] ='
+        '''Enhanced repr to show read/write operations in tree format'''
+        # Start with array declaration
+        res = f'{self.name} = [{self.scalar_ty}; {self.size}];'
 
-        # Add write port information if any
-        if hasattr(self, '_write_ports') and self._write_ports:
-            port_info = f' /* {len(self._write_ports)} write ports: '
-            port_info += ', '.join(m.name for m in self._write_ports)
-            port_info += ' */'
-            res += port_info
+        # Collect read and write operations
+        read_ops = []
+        write_ops = []
 
-        res += ' [ '
-        res += '\n'
-        res += f'{self.name}, '
-        if self._write_ports:
-            res += f'write_ports: /* {len(self._write_ports)}: '
-            res += ', '.join(m.name for m in self._write_ports)
-            res += ' */'
+        for user in self._users:
+            if isinstance(user, ArrayRead):
+                read_ops.append(user)
+            elif isinstance(user, ArrayWrite):
+                write_ops.append(user)
 
-        return res + ' ]'
+        # Build tree structure
+        all_ops = []
+
+        # Add read operations
+        for read_op in read_ops:
+            module_name = getattr(read_op.parent, 'module', None)
+            module_str = getattr(module_name, 'name', 'Unknown') if module_name else 'Unknown'
+            all_ops.append(f'Read  by: {read_op} in {module_str}')
+
+        # Add write operations
+        for write_op in write_ops:
+            module_name = getattr(write_op.parent, 'module', None)
+            module_str = getattr(module_name, 'name', 'Unknown') if module_name else 'Unknown'
+            all_ops.append(f'Write by: {write_op} in {module_str}')
+
+        # Format tree structure
+        if all_ops:
+            res += '\n'
+            for i, op in enumerate(all_ops):
+                if i == len(all_ops) - 1:
+                    # Last item uses `-
+                    res += f'  `- {op}'
+                else:
+                    # Other items use |-
+                    res += f'  |- {op}'
+                if i < len(all_ops) - 1:
+                    res += '\n'
+
+        return res
 
     @property
     def index_bits(self):
@@ -233,6 +256,7 @@ class Array:  #pylint: disable=too-many-instance-attributes
             index = to_uint(index)
         assert isinstance(index, Value)
         assert isinstance(value, (Value, RecordValue)), type(value)
+
         current_module = Singleton.builder.current_module
         write_port = self & current_module
         return write_port._create_write(index, value)
