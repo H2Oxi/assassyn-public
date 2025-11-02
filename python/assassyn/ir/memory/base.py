@@ -55,7 +55,13 @@ class MemoryBase(Downstream):
         self.addr_width = int(math.log2(depth))
         
         # Create the payload array with instance-prefixed name
-        self._payload = RegArray(Bits(width), depth, attr=[self], name=f'{self.name}_val')
+        self._payload = RegArray(
+            Bits(width),
+            depth,
+            attr=[self],
+            name=f'{self.name}_val',
+            owner=self,
+        )
         
         # Initialize signal attributes to None
         self.we = None

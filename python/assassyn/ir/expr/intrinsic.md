@@ -42,11 +42,13 @@ The class for intrinsic operations with side effects. These operations may have 
 - `opcode: int` - Operation code for this intrinsic
 
 **Methods:**
-- `__init__(opcode, *args)` - Initialize intrinsic with opcode and arguments
+- `__init__(opcode, *args, meta_cond=None)` - Initialize the intrinsic with opcode and arguments. The constructor forwards `meta_cond` to the base `Expr`, which records the current predicate carry (defaulting to [`get_pred()`](intrinsic.md#get_pred) when omitted).
 - `args` - Get the arguments of this intrinsic (property)
 - `dtype` - Get the data type of this intrinsic (property)
 - `__enter__()` - Context manager entry
 - `__exit__(exc_type, exc_value, traceback)` - Context manager exit
+
+`Intrinsic` inherits `meta_cond` from `Expr`, so backends consume predicate metadata in a uniform way across all expression types.
 
 #### `class PureIntrinsic(Expr)`
 
@@ -62,9 +64,11 @@ The class for pure intrinsic operations without side effects. These operations a
 - `GET_MEM_RESP = 912` - Get memory response data
 
 **Methods:**
-- `__init__(opcode, *args)` - Initialize pure intrinsic with opcode and arguments
+- `__init__(opcode, *args, meta_cond=None)` - Initialize the pure intrinsic with opcode and arguments, forwarding `meta_cond` to the base `Expr` so predicate carries are captured automatically (defaults to `get_pred()` when omitted).
 - `args` - Get the arguments of this intrinsic (property)
 - `dtype` - Get the data type of this intrinsic (property)
+
+Pure intrinsics reuse the same predicate metadata accessor defined on `Expr`, making valued nodes participate in the same control-flow instrumentation as side-effect operations.
 
 ### Frontend Functions
 

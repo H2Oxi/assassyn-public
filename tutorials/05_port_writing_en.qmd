@@ -1,0 +1,584 @@
+---
+title: "Understanding Port Writing in Assassyn"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    mermaid:
+      theme: default
+      themeVariables:
+        clusterBkg: "#f8fafc"
+        clusterBorder: "#cbd5e1"
+        primaryColor: "#ffffff"
+        primaryTextColor: "#0f172a"
+        lineColor: "#475569"
+
+---
+
+# Tutorial: Understanding Port Writing in Assassyn
+
+> **Author:** Yao Wentao
+> **Date:** 2025.10.15
+>
+
+## 1. Introduction
+
+In previous tutorials, we learned about inter-module communication using `async_called()`. Under the hood, `async_called()` uses **Port Writing** (the `.push()` operation) to send data to module ports. This tutorial explores port writing directly, giving you finer control over inter-module communication.
+
+**Learning Objectives:**
+
+* Understand the relationship between `async_called()` and `.push()`
+* Learn how to explicitly write data to ports using `.push()`
+* Master FIFO-based communication between modules
+* Understand FIFO depth configuration and backpressure
+
+---
+
+## 2. Port Basics Review
+
+### 2.1 What is a Port?
+
+A **Port** is a typed communication interface in Assassyn modules. Each port has:
+- A **data type** (e.g., `UInt(32)`, `Int(64)`)
+- A **FIFO buffer** for storing data
+- Operations: `push()` (write), `pop()` (read), `peek()` (read without consuming), `valid()` (check if data available)
+
+### 2.2 Port Operations Overview
+
+```{mermaid}
+%%| fig-width: 8
+flowchart LR
+  subgraph Producer[Producer Module]
+    P1[Compute Value]
+    P2["port.push(value)"]
+  end
+
+  subgraph FIFO[Port FIFO Buffer]
+    F1[Queue Storage]
+  end
+
+  subgraph Consumer[Consumer Module]
+    C1["port.valid()"]
+    C2["port.pop()"]
+    C3[Process Value]
+  end
+
+  P1 --> P2
+  P2 -- Write --> F1
+  F1 -- Read --> C1
+  C1 --> C2
+  C2 --> C3
+
+  style FIFO fill:#fff3e0
+  style Producer fill:#e3f2fd
+  style Consumer fill:#e8f5e9
+```
+
+---
+
+## 3. Port Writing Fundamentals
+
+### 3.1 The `.push()` Operation
+
+The `.push()` method writes data to a port's FIFO buffer:
+
+```python
+# port.push(value) - Write value to port
+my_module.my_port.push(some_value)
+```
+
+**Key Characteristics:**
+- **Non-blocking write:** Data is queued in the FIFO
+- **One-cycle delay:** Consumer reads the data in the next cycle
+- **FIFO buffering:** Multiple values can be queued (depending on FIFO depth)
+
+### 3.2 How `async_called()` Uses `.push()`
+
+When you write:
+```python
+adder.async_called(a=value1, b=value2)
+```
+
+Assassyn internally creates:
+```python
+adder.a.push(value1)
+adder.b.push(value2)
+# Then triggers module execution
+```
+
+This explains why `async_called()` requires **all ports** to be provided!
+
+---
+
+## 4. Environment Setup
+
+Let's set up our environment for the examples:
+
+```{python}
+#| code-fold: false
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import sys
+import os
+
+# Set ASSASSYN_HOME environment variable before importing assassyn
+assassyn_home = os.path.abspath(os.path.join(os.path.dirname("04_port_writing_en.qmd"), '..'))
+os.environ['ASSASSYN_HOME'] = assassyn_home
+
+lib_path = os.path.join(assassyn_home, 'python')
+sys.path.insert(0, lib_path)
+
+from function_t import run_quietly
+from assassyn.frontend import *
+from assassyn.backend import elaborate
+from assassyn import utils
+import assassyn
+
+print("✅ Environment setup completed")
+```
+
+---
+
+## 5. Practical Example: Producer-Consumer Pattern
+
+### 5.1 System Architecture
+
+```{mermaid}
+%%| fig-width: 10
+flowchart TD
+  subgraph Driver[Driver Producer]
+    D1[Generate counter]
+    D2[Push to Producer]
+  end
+
+  subgraph Producer[Producer Module]
+    P1[Receive data via port]
+    P2["Process data times 2"]
+    P3[Push to Consumer]
+  end
+
+  subgraph Consumer[Consumer Module]
+  C1[Receive via port]
+    C2["Process data plus 100"]
+    C3[Log result]
+  end
+
+  D1 --> D2
+  D2 -- async_called --> P1
+  P1 --> P2
+  P2 --> P3
+  P3 -- explicit push --> C1
+  C1 --> C2
+  C2 --> C3
+
+  style Driver fill:#e3f2fd
+  style Producer fill:#fff3e0
+  style Consumer fill:#e8f5e9
+```
+
+### 5.2 Module Definitions
+
+#### Consumer Module
+
+This module has an input port and processes received data:
+
+```{python}
+#| code-fold: false
+
+class Consumer(Module):
+    def __init__(self):
+        super().__init__(
+            ports={'data_in': Port(UInt(32))}
+        )
+
+    @module.combinational
+    def build(self):
+        # Pop data from port
+        data = self.pop_all_ports(True)
+
+        # Process: add 100
+        result = data + UInt(32)(100)
+
+        log("Consumer received: {}, result: {}", data, result)
+
+print("✅ Consumer module defined")
+```
+
+#### Producer Module
+
+This module receives data, processes it, and explicitly pushes to the consumer:
+
+```{python}
+#| code-fold: false
+
+class Producer(Module):
+    def __init__(self):
+        super().__init__(
+            ports={'data_in': Port(UInt(32))}
+        )
+
+    @module.combinational
+    def build(self, consumer: Consumer):
+        # Receive data from upstream
+        data = self.pop_all_ports(True)
+
+        # Process: left shift by 1 (equivalent to multiply by 2), keeps UInt(32) type
+        processed = data << UInt(32)(1)
+
+        log("Producer received: {}, sending: {}", data, processed)
+
+        # Explicitly push to consumer's port
+        consumer.data_in.push(processed)
+
+print("✅ Producer module defined")
+```
+
+**Key Point:** Notice how `Producer.build()` explicitly calls `consumer.data_in.push(processed)` to send data to the consumer's port. This is the **explicit port writing** operation.
+
+#### Driver Module
+
+The driver generates data and feeds it to the producer:
+
+```{python}
+#| code-fold: false
+
+class Driver(Module):
+    def __init__(self):
+        super().__init__(ports={})
+
+    @module.combinational
+    def build(self, producer: Producer):
+        cnt = RegArray(UInt(32), 1)
+        (cnt & self)[0] <= cnt[0] + UInt(32)(1)
+
+        # Only send first 10 values
+        cond = cnt[0] < UInt(32)(10)
+        with Condition(cond):
+            producer.async_called(data_in=cnt[0])
+
+print("✅ Driver module defined")
+```
+
+### 5.3 Timing Diagram
+
+Understanding the timing of port operations:
+
+```{mermaid}
+%%| fig-width: 10
+sequenceDiagram
+  autonumber
+  participant D as Driver
+  participant P as Producer
+  participant C as Consumer
+  participant L as Log Output
+
+  Note over D: Cycle N, cnt = 0
+  D->>P: async_called data_in=0
+  Note over P: FIFO receives 0
+
+  Note over D: Cycle N+1, cnt = 1
+  Note over P: Executes received=0
+  P->>P: processed = 0 * 2 = 0
+  P->>L: log Producer received 0 sending 0
+  P->>C: push 0
+  D->>P: async_called data_in=1
+
+  Note over D: Cycle N+2, cnt = 2
+  Note over C: Executes received=0
+  C->>C: result = 0 + 100 = 100
+  C->>L: log Consumer received 0 result 100
+  Note over P: Executes received=1
+  P->>P: processed = 1 * 2 = 2
+  P->>L: log Producer received 1 sending 2
+  P->>C: push 2
+
+  Note over D,C: Pipeline 2-cycle latency
+```
+
+---
+
+## 6. Verification Logic
+
+Define a function to verify the output:
+
+```{python}
+def check_output(raw):
+    producer_lines = []
+    consumer_lines = []
+
+    for line in raw.split('\n'):
+        # Look for lines with "Producer received:"
+        if 'Producer' in line and 'received' in line:
+            # Extract: Producer received: X, sending: Y
+            try:
+                # Format: @line:... [ProducerInstance] Producer received: X, sending: Y
+                if 'sending:' in line:
+                    parts = line.split('sending:')
+                    if len(parts) == 2:
+                        sent_val_str = parts[1].strip().rstrip(',')
+                        sent_val = int(sent_val_str)
+                        producer_lines.append(sent_val)
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Failed to parse Producer line: {line}, error: {e}")
+
+        # Look for lines with "Consumer received:"
+        elif 'Consumer' in line and 'received' in line:
+            # Extract: Consumer received: X, result: Y
+            try:
+                # Format: @line:... [ConsumerInstance] Consumer received: X, result: Y
+                if 'result:' in line:
+                    parts = line.split('result:')
+                    if len(parts) == 2:
+                        result_val_str = parts[1].strip().rstrip(',')
+                        result_val = int(result_val_str)
+                        consumer_lines.append(result_val)
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Failed to parse Consumer line: {line}, error: {e}")
+
+    print(f"DEBUG: Found {len(producer_lines)} Producer outputs")
+    print(f"DEBUG: Found {len(consumer_lines)} Consumer outputs")
+
+    # Verify pipeline: Consumer receives what Producer sends
+    if len(producer_lines) == 0:
+        print("⚠️ Warning: No Producer output found, may be an output format issue")
+        return
+
+    if len(consumer_lines) == 0:
+        print("⚠️ Warning: No Consumer output found, may be an output format issue")
+        return
+
+    # Verify: Consumer result = Producer sent + 100
+    for i in range(min(len(producer_lines), len(consumer_lines))):
+        expected = producer_lines[i] + 100
+        actual = consumer_lines[i]
+        if actual != expected:
+            print(f"❌ Mismatch at {i}: expected {expected}, got {actual}")
+            return
+
+    print(f"✅ Verification passed! Producer sent {len(producer_lines)} values, Consumer processed {len(consumer_lines)} values")
+
+print("✅ Verification function defined")
+```
+
+---
+
+## 7. Build and Simulation
+
+Now let's build the system and run simulation:
+
+```{python}
+#| output-fold: true
+
+print("Starting build and simulation...")
+
+# 1. Build system
+sys = SysBuilder('port_writing')
+with sys:
+    # Instantiate modules
+    consumer = Consumer()
+    consumer.build()
+
+    producer = Producer()
+    producer.build(consumer)
+
+    driver = Driver()
+    driver.build(producer)
+
+print(sys)
+
+# 2. Configure simulation parameters
+config = assassyn.backend.config(
+    verilog=utils.has_verilator(),
+    sim_threshold=50,
+    idle_threshold=50,
+    random=True
+)
+
+# 3. Generate simulator
+def generate_simulator():
+    return elaborate(sys, **config)
+
+(simulator_path, verilator_path), _, _ = run_quietly(generate_simulator)
+print("✅ Simulator generation completed")
+
+# 4. Run simulator
+def run_sim():
+    return utils.run_simulator(simulator_path)
+
+raw, stdout, stderr = run_quietly(run_sim)
+
+# Check if raw is None (indicates an error during execution)
+if raw is None or not isinstance(raw, str):
+    print("⚠️ Error: Simulator execution failed")
+    if stderr:
+        print("Error output:")
+        print(stderr)
+    if stdout:
+        print("Standard output:")
+        print(stdout)
+    raise RuntimeError(f"Simulator failed: {stderr}")
+
+print("\n=== Simulator Output (first 10 pairs) ===")
+count = 0
+print("DEBUG: Starting to parse output...")
+print(f"DEBUG: Total output length: {len(raw)} characters")
+print("DEBUG: First 500 characters:")
+print(raw[:500])
+print("\nDEBUG: Looking for lines with 'Producer' or 'Consumer'...")
+for line in raw.split('\n'):
+    if 'Producer' in line or 'Consumer' in line:
+        print(line.strip())
+        if 'Consumer' in line:
+            count += 1
+            if count >= 10:
+                break
+
+# Verify output
+check_output(raw)
+
+# If Verilator is available, also run Verilator verification
+if verilator_path:
+    print("\n=== Verilator Verification ===")
+
+    def run_verilator():
+        return utils.run_verilator(verilator_path)
+
+    raw_verilator, stdout_v, stderr_v = run_quietly(run_verilator)
+
+    # Check if raw_verilator is None
+    if raw_verilator is None or not isinstance(raw_verilator, str):
+        print("⚠️ Error: Verilator execution failed")
+        if stderr_v:
+            print("Error output:")
+            print(stderr_v)
+        if stdout_v:
+            print("Standard output:")
+            print(stdout_v)
+        raise RuntimeError(f"Verilator failed: {stderr_v}")
+
+    # Verify Verilator's output
+    check_output(raw_verilator)
+else:
+    print("⚠️ Verilator not installed, skipping Verilator verification")
+```
+
+---
+
+## 8. Advanced Topics
+
+### 8.1 FIFO Depth Configuration
+
+By default, ports have a FIFO depth of 2. You can configure this when using `async_called()`:
+
+```python
+# Example: Set custom FIFO depth
+bind = producer.bind(data_in=value)
+bind.set_fifo_depth(data_in=10)  # Set depth to 10
+call = AsyncCall(bind)
+```
+
+Or with `async_called()`:
+```python
+# Direct approach
+bind = producer.bind(data_in=value).set_fifo_depth(data_in=10)
+AsyncCall(bind)
+```
+
+### 8.2 Checking FIFO Status
+
+You can check if data is available before popping:
+
+```python
+@module.combinational
+def build(self):
+    # Check if port has valid data
+    if self.data_in.valid():
+        data = self.data_in.pop()
+        # Process data
+    else:
+        # Handle empty case
+        pass
+```
+
+### 8.3 Backpressure Handling
+
+Assassyn automatically handles backpressure:
+- If FIFO is full, `.push()` will wait
+- If FIFO is empty, `.pop()` will wait (when using `pop_all_ports(True)`)
+
+This is why `pop_all_ports(True)` sets the module to **backpressure timing mode**.
+
+---
+
+## 9. Comparison: `async_called()` vs Explicit `.push()`
+
+| Feature | `async_called()` | Explicit `.push()` |
+|---------|------------------|-------------------|
+| **Usage** | High-level API | Low-level API |
+| **Ports** | Must provide all ports | Can push to individual ports |
+| **Convenience** | More convenient | More flexible |
+| **Module Activation** | Automatically triggers module | Manual control over timing |
+| **Typical Use Case** | Standard inter-module calls | Complex communication patterns |
+
+**When to use `.push()`:**
+- Need fine-grained control over port writing
+- Want to push to only some ports conditionally
+- Building custom communication patterns
+- Implementing specialized protocols
+
+**When to use `async_called()`:**
+- Standard module-to-module communication
+- All ports need values
+- Simpler, cleaner code
+
+---
+
+## 10. Key Takeaways
+
+1. **`.push()` is the fundamental operation** for writing to ports
+2. **`async_called()` uses `.push()` internally** for all ports
+3. **FIFO buffers** enable asynchronous, pipelined communication
+4. **Pipeline stages** are created through port-based communication
+5. **Explicit port writing** gives fine-grained control when needed
+
+### Understanding the Pipeline
+
+```{mermaid}
+%%| fig-width: 10
+flowchart LR
+  subgraph Stage1[Stage 1 Driver]
+    S1[Generate cnt]
+  end
+
+  subgraph Stage2[Stage 2 Producer]
+    S2[Process cnt times 2]
+  end
+
+  subgraph Stage3[Stage 3 Consumer]
+    S3[Process data plus 100]
+  end
+
+  Stage1 -- push via async_called --> Stage2
+  Stage2 -- push explicit --> Stage3
+
+  style Stage1 fill:#e3f2fd
+  style Stage2 fill:#fff3e0
+  style Stage3 fill:#e8f5e9
+```
+
+This tutorial demonstrated:
+- How to explicitly write to ports using `.push()`
+- The relationship between `async_called()` and port writing
+- Building multi-stage pipelines with explicit port control
+- Verifying correct data flow through the pipeline
+
+---
+
+## 11. Further Reading
+
+- [python/assassyn/ir/module/module.md](../python/assassyn/ir/module/module.md) - Port class documentation
+- [python/assassyn/ir/expr/call.md](../python/assassyn/ir/expr/call.md) - FIFOPush and Bind operations
+- Tutorial 01: Async Call - For comparison with high-level `async_called()`
+- Tutorial 02: Downstream modules - Another communication pattern

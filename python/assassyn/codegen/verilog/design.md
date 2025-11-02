@@ -2,6 +2,12 @@
 
 This module provides the main Verilog design generation functionality, including the CIRCTDumper class that converts Assassyn IR into CIRCT-compatible Verilog code and the generate_design function that orchestrates the complete design generation process. The generator also accumulates the metadata required to stitch together external SystemVerilog modules and multi-port array writers.
 
+Metadata consumed by the dumper (`InteractionMatrix`, `ModuleMetadata`, `ArrayMetadata`,
+and the various interaction views) is sourced from the
+`python.assassyn.codegen.verilog.metadata` package.  The package re-exports the legacy
+symbols while housing their implementations across `metadata.core`, `metadata.module`,
+`metadata.array`, and `metadata.fifo`, keeping imports stable for callers.
+
 ## Design Documents
 
 - [Simulator Design](../../../docs/design/internal/simulator.md) - Simulator design and code generation
@@ -41,7 +47,8 @@ This module provides the main Verilog design generation functionality, including
 3. **Port Mapping**: External module ports are mapped to internal signals
 4. **Signal Routing**: External module signals are routed through the design
 5. **Co-simulation Support**: External modules are integrated for co-simulation
-6. **Cross-Module Output Tracking**: `CIRCTDumper` now tracks every cross-module read of an external register output via `cross_module_external_reads`, `external_outputs_by_instance`, and the normalised wire keys returned by `get_external_wire_key`, allowing downstream passes to declare data/valid ports exactly once per producer.
+6. **Cross-Module Output Tracking**: `CIRCTDumper.external_metadata` stores every cross-module read of an external register output alongside the owning module and instance, and the dumper reuses the normalised wire keys returned by `get_external_wire_key` to declare data/valid ports exactly once per producer.
+7. **Centralised Detection Logic**: External-module identification is now handled by the system-analysis bookkeeping shared with the simulator’s [external stub utilities](../simulator/external.md); the dumper does not expose dedicated helper predicates anymore.
 
 **Credit-Based Pipeline Implementation Details:** The Verilog design generation implements the credit-based pipeline:
 
@@ -102,37 +109,38 @@ class CIRCTDumper(Visitor):
 
 The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog code. It inherits from the Visitor pattern and implements the credit-based pipeline architecture. The class maintains extensive state for managing:
 
-1. **Execution Control**: `wait_until`, `cond_stack`, and `finish_conditions` track predicate stacking, wait-until clauses, and FINISH intrinsics.
-2. **Module State**: `current_module`, `_exposes`, `module_ctx`, and `exposed_ports_to_add` capture which values need to become ports.
-3. **Array Management**: `array_write_port_mapping`, `array_users`, `sram_payload_arrays`, and `memory_defs` orchestrate multi-port array writers and SRAM payloads.
-4. **External Integration**: `external_intrinsics`, `external_classes`, `external_wrapper_names`, `external_instance_names`, `external_instance_owners`, `cross_module_external_reads`, `external_outputs_by_instance`, and `external_output_exposures` track how `ExternalIntrinsic` nodes map to wrapper modules, which modules read each exposed register output, and the producer-side ports required to materialise those reads.
+1. **Execution Control**: `wait_until` and per-expression `meta_cond` metadata decide when statements run, while FINISH gating now reads the precomputed `finish_sites` stored in module metadata instead of collecting tuples during emission.
+2. **Module State**: `current_module` tracks traversal context, while port declarations are derived from immutable metadata instead of mutating dumper dictionaries.
+3. **Array Management**: `array_metadata`, `memory_defs`, and ownership metadata ensure multi-port register arrays are emitted while memory payloads (`array.is_payload(memory)` returning `True`) are routed through dedicated generators.
+4. **External Integration**: `external_metadata` (an `ExternalRegistry`) captures external classes, instance ownership, and cross-module reads. Runtime maps (`external_wrapper_names`, `external_instance_names`, `external_wire_assignments`, `external_wire_outputs`, and `external_output_exposures`) reuse that registry to materialise expose/valid ports and wire consumers to producers without recomputing analysis.
 5. **Expression Naming**: `expr_to_name` and `name_counters` guarantee deterministic signal names whenever expression results must be reused across statements.
 6. **Code Generation**: `code`, `logs`, and `indent` store emitted lines and diagnostic information used later by the testbench.
-7. **Module Metadata**: `module_metadata` maps each Module to its `PostDesignGeneration` metadata, tracking properties like whether the module contains FINISH intrinsics. This metadata is populated during module generation and consumed during top-level harness generation to avoid redundant expression walking. See [metadata module](/python/assassyn/codegen/verilog/metadata.md) for details.
+7. **Module Metadata**: `module_metadata` maps each `Module` to its `ModuleMetadata`. The structure tracks FINISH intrinsics, async calls, FIFO interactions (annotated with `expr.meta_cond`), and every array/value exposure required for cleanup. These entries are populated before the dumper is constructed via [`collect_fifo_metadata`](./analysis.md), so `CIRCTDumper` receives a frozen snapshot and never mutates it during emission. See [metadata module](/python/assassyn/codegen/verilog/metadata.md) for details. The dumper exposes this information via convenience helpers such as `async_callers(module)`, which forwards to the frozen `AsyncLedger` stored on the interaction matrix.
+
+During the cleanup pass the dumper feeds the precomputed metadata into `_emit_predicate_mux_chain`, producing both the `reduce(or_, …)` guards and prioritised mux chains shared by array writes and FIFO pushes. The helper now short-circuits single-entry collections to direct assignments and relies on caller-supplied defaults when metadata yields no interactions, keeping the emitted Verilog stable if predicate formatting or default literals change in the future.
 
 #### Key Methods
 
 **`visit_system`**: Generates code for the entire system by calling `generate_system()`
 
 **`visit_module`**: Generates a complete Verilog module with the following phases:
-1. **Analysis Phase**: Processes the module body, collecting exposes, async call metadata, and external wiring information. During this phase, metadata for pushes and calls is collected incrementally as expressions are processed.
-2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces, using the captured expose data and the metadata lists (pushes/calls) instead of re-walking the module body.
+1. **Analysis Phase**: Assumes module metadata has already been collected. `visit_module` prepares transient state (e.g. code buffers) and processes the module body primarily for code emission; FINISH flags, async calls, and exposure bookkeeping are already locked in the metadata snapshot.
+2. **Port Generation**: Calls `generate_module_ports()` to create module interfaces. The helper derives downstream/SRAM/driver roles and reads FIFO plus exposure metadata directly from `CIRCTDumper.module_metadata`, so `visit_module` no longer threads redundant flags or maintains `_exposes`.
 3. **Code Integration**: Combines the collected body statements with the module boilerplate and generator decorators.
 4. **Special Handling**: Resets external bookkeeping between modules, emits SRAM-specific prelude code, and avoids instantiating pure external stubs.
 
-**`visit_array`**: Generates multi-port array modules with:
-- Write port interfaces for each writing module (based on `array_write_port_mapping`)
-- Multi-port arbitration loops that prioritise the last matching port
-- Register-based storage with programmable reset values
-- Outputs that feed downstream module array readers
+**`visit_array`**: Generates multi-port register files by delegating to `assassyn.pycde_wrapper.build_register_file`:
+- Computes the wrapper name from `array.name` and derives the address width from `array.index_bits` (minimum 1) so single-entry arrays continue to use constant read indices.
+- Passes write/read port counts from `ArrayMetadataRegistry`, preserving reverse-priority arbitration for writers through the helper’s internal mux ordering.
+- Threads the IR initializer list through to the helper, which coerces values into the target PyCDE element type before constructing the reset literal.
+- Requests read-index ports only when the array exposes indexed reads, keeping generated signatures stable for width-one arrays while still wiring `ridx_port<i>` for larger memories.
+- The resulting module exposes the same `w*_port<i>`/`widx*_port<i>`/`wdata*_port<i>` and `ridx*_port<i>`/`rdata*_port<i>` interface consumed by `_connect_array`.
 
-**`visit_expr`**: Delegates expression generation to the expression dispatch system, emits helpful `#` comments with source locations, exposes valued expressions when `expr_externally_used` requires it, and defers wire reads to the external wiring machinery when applicable.
+**`visit_expr`**: Delegates expression generation to the expression dispatch system, emits helpful `#` comments with source locations, and defers wire reads to the external wiring machinery when applicable. Exposure decisions are made during the analysis pre-pass, so emission only formats code.
 
-**`visit_block`**: Manages conditional and cycled blocks by maintaining a condition stack for proper predicate generation; when a conditional contains logging or other side effects it exposes the condition to the outside world to keep the testbench accurate.
+**`visit_block`**: Visits conditional and cycled blocks, relying on the IR-level `meta_cond` metadata captured during construction to keep predicates aligned across code generation, metadata collection, and log emission.
 
-**`expose`**: Registers expressions that need to be exposed as module outputs, handling different types (expr, array, fifo, trigger). The collected metadata ultimately drives both module-level port declarations and the top-level harness wiring.
-
-**`get_pred`**: Generates the current execution predicate by combining all conditions in the condition stack
+**`get_pred(expr)`**: Formats the predicate metadata attached to `expr`. The dumper consumes the final carry exposed via `expr.meta_cond`, and expressions that lack `meta_cond` now trigger an explicit error so refactors cannot silently drop predicate capture.
 
 **`get_external_port_name`**: Creates mangled port names for external values to avoid naming conflicts
 
@@ -147,13 +155,11 @@ The CIRCTDumper class is the main visitor that converts Assassyn IR into Verilog
 
 #### Internal Helpers
 
-**`_walk_expressions`**: Recursively traverses blocks to find all expressions for analysis
-
 **`_generate_external_module_wrapper`**: Creates PyCDE wrapper classes for external SystemVerilog modules. If the external metadata defines explicit wires (and their direction), the wrapper mirrors them; otherwise it falls back to treating the declared ports as inputs for backwards compatibility. Clock/reset ports are emitted when requested by the metadata.
 
-**`_connect_array`**: Handles multi-port array connections between modules by wiring each module’s per-port write enable/data/index signals into the shared array writer instance the dumper previously generated.
+**`_connect_array`**: Handles multi-port array connections between modules by wiring each module’s per-port write enable/data/index signals into the shared register-file instance produced by `build_register_file`. When an array’s address width is zero, the helper omits `ridx_port<i>` entirely, so `_connect_array` only drives the write triplets and surfaces each reader’s data output.
 
-**`_is_external_module`**: Determines if a module represents an external implementation
+Direct traversal of module bodies is performed inline where needed: since `DONE-remove-block` flattened every module’s `body` list, consumers iterate those statements directly and filter for `Expr` subclasses to perform per-expression analysis.
 
 The CIRCTDumper class integrates with multiple other modules:
 - [Expression generation](/python/assassyn/codegen/verilog/_expr/__init__.md) for handling different expression types

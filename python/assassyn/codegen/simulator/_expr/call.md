@@ -37,7 +37,7 @@ Schedules an asynchronous event by pushing a future timestamp onto the callee's 
 ```
 
 **Explanation:**
-The function calculates a timestamp for the next cycle (current cycle + 100) and pushes it to the callee's event queue. This follows the simulator's timing model where pipeline stages are triggered at cycle boundaries. The callee module will check its event queue and execute when the timestamp matches the current simulation time.
+The function calculates a timestamp for the next cycle (current cycle + 100) and pushes it to the callee's event queue. This follows the simulator's timing model where pipeline stages are triggered at cycle boundaries. The callee module checks its event queue and executes when the timestamp matches the current simulation time.
 
 ### codegen_fifo_pop
 

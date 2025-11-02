@@ -1,0 +1,201 @@
+---
+title: "Understanding Assassyn's Trace-based DSL"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+
+---
+
+# Tutorial: Understanding Assassyn's Trace-based DSL
+
+> **Author:** Yao Wentao
+> 
+> **Date:** 2025.10.15
+>
+
+## 1. Introduction
+
+Assassyn adopts a **trace-based DSL** (Domain-Specific Language) embedded in Python. Unlike traditional parser-based frontends, trace-based DSL builds the Abstract Syntax Tree (AST) of hardware descriptions through **operator overloading**.
+
+**Core Idea:** Within the tracing scope, `a + b` doesn't compute a result, but creates an `Add` node in the IR. The execution of Python code is the process of building the IR.
+
+---
+
+## 2. Python `if` vs Assassyn `Condition`: Core Differences
+
+### 2.1 Conceptual Comparison
+
+| Feature | Python `if` | Assassyn `Condition` |
+|------|------------|---------------------|
+| Evaluation Timing | Compile-time (Python runtime) | Hardware runtime |
+| Purpose | Control trace path, conditional compilation | Generate hardware conditional logic |
+| Hardware Generation | None, directly selects branch | Generates mux and conditional blocks |
+| Analogy | C/C++ `#if` preprocessing | Verilog `if` statement |
+
+### 2.2 Practical Comparison
+
+```{python}
+#| code-fold: false
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import sys
+import os
+lib_path = os.path.abspath(os.path.join(os.path.dirname("03_trace_based_dsl_en.qmd"), '../python/'))
+sys.path.append(lib_path)
+from function_t import run_quietly, build_and_show_ir
+
+from assassyn.frontend import *
+from assassyn.backend import elaborate
+from assassyn import utils
+import assassyn
+
+print("✅ Environment setup complete")
+```
+
+#### Example 1: Python `if` - Conditional Compilation
+
+```{python}
+#| code-fold: false
+
+ENABLE_FEATURE = True
+
+class PythonIfExample(Module):
+    def __init__(self):
+        super().__init__(ports={})
+
+    @module.combinational
+    def build(self):
+        counter = RegArray(UInt(32), 1)
+        counter[0] = counter[0] + UInt(32)(1)
+
+        if ENABLE_FEATURE:
+            result = counter[0] * UInt(32)(2)  # This branch is traced
+        else:
+            result = counter[0] + UInt(32)(10)  # This branch is NOT traced
+
+sys1 = build_and_show_ir(PythonIfExample, 'python_if_demo')
+```
+
+**Key Observations:** <br>
+- IR directly contains `result = counter * 2`, without conditional blocks <br>
+- The addition logic in the `else` branch does not exist in the IR <br>
+- Hardware structure is determined at compile-time
+
+#### Example 2: Assassyn `Condition` - Hardware Conditional
+
+```{python}
+#| code-fold: false
+
+class ConditionExample(Module):
+    def __init__(self):
+        super().__init__(ports={})
+
+    @module.combinational
+    def build(self):
+        counter = RegArray(UInt(32), 1)
+        counter[0] = counter[0] + UInt(32)(1)
+
+        enable = counter[0] < UInt(32)(50)  # Hardware signal
+        with Condition(enable):
+            result = counter[0] * UInt(32)(2)
+
+sys2 = build_and_show_ir(ConditionExample, 'condition_demo')
+```
+
+**Key Observations:** <br>
+- IR contains `when enable { ... }` conditional block <br>
+- All code is traced, hardware dynamically evaluates at runtime
+
+---
+
+## 3. Mixed Usage Example
+
+```{python}
+#| code-fold: false
+
+# Python constants - for conditional compilation
+DEBUG_MODE = True
+MAX_COUNT = 10
+
+class ConditionalCounter(Module):
+    def __init__(self):
+        super().__init__(ports={'enable': Port(Bits(1))})
+
+    @module.combinational
+    def build(self):
+        enable = self.pop_all_ports(True)
+        counter = RegArray(UInt(32), 1)
+
+        # Python if: compile-time threshold decision
+        threshold = UInt(32)(10 if MAX_COUNT == 10 else 20)
+
+        # Assassyn Condition: runtime evaluation
+        with Condition(counter[0] < threshold):
+            counter[0] = counter[0] + UInt(32)(1)
+
+        with Condition(enable[0:0]):
+            log("[Runtime] Counter: {}", counter[0])
+
+        # Python if: conditional compilation of debug info
+        if DEBUG_MODE:
+            log("[Debug] Counter={}", counter[0])
+
+print("Module definition complete")
+```
+
+### Build and Simulation
+
+```{python}
+# | output-fold: true
+
+# Build system
+sys_build = SysBuilder("trace_dsl_demo")
+with sys_build:
+    counter = ConditionalCounter()
+    counter.build()
+
+print(sys_build)
+
+# Configure and generate simulator
+config = assassyn.backend.config(
+    verilog=utils.has_verilator(),
+    sim_threshold=50,
+    idle_threshold=50,
+    random=False
+)
+
+def generate_and_run():
+    (sim_path, _), _, _ = run_quietly(lambda: elaborate(sys_build, **config))
+    return utils.run_simulator(sim_path)
+
+raw, _, _ = run_quietly(generate_and_run)
+
+print("\n=== Simulation Output (first 15 lines) ===")
+for line in raw.split("\n")[:15]:
+    if line.strip():
+        print(line)
+```
+
+---
+
+## 4. Summary
+
+**Key Takeaways:** <br>
+1. **Trace-based DSL** builds IR through operator overloading <br>
+2. **Python `if`** evaluates at compile-time, controls trace path (analogous to C's `#if`)<br>
+3. **Assassyn `Condition`** generates hardware conditional logic, evaluates at hardware runtime (analogous to Verilog's `if`)<br>
+
+| Assassyn | C/C++ | Verilog | Evaluation Timing |
+|----------|-------|---------|---------|
+| Python `if` | `#if` | None (parameterization) | Compile-time |
+| `Condition` | `if` | `if` | Runtime |
+
+## 5. Further Reading
+
+- [docs/design/lang/trace.md](../docs/design/lang/trace.md) - Trace-based DSL design documentation
+- [docs/design/lang/dsl.md](../docs/design/lang/dsl.md) - DSL concept overview
+
+---

@@ -36,18 +36,20 @@ The base class for all expression nodes in the IR. It serves as the foundation f
 **Fields:**
 - `opcode: int` - Operation code for this expression
 - `loc: str` - Source location information  
-- `parent: typing.Optional[Block]` - Parent block of this expression
+- `parent: typing.Optional[ModuleBase]` - Owning module of this expression (set by the builder)
 - `users: typing.List[Operand]` - List of users of this expression
 - `_operands: typing.List[typing.Union[Operand, Port, Array, int]]` - List of operands of this expression
+- `_meta_cond: Value | None` - The cumulative predicate (`AND` of active predicate conditions) captured when the node is created. When the builder has an active predicate stack, this references the top frame’s `carry`. If no builder is active, the field remains `None`. Callers may override it explicitly via the `meta_cond` keyword argument.
 
 **Methods:**
-- `__init__(opcode, operands: list)` - Initialize the expression with an opcode
+- `__init__(opcode, operands: list, *, meta_cond: Value | None = None)` - Initialize the expression with an opcode. Unless an explicit `meta_cond` is supplied, the constructor queries the builder’s predicate stack (if available) and stores the top frame’s `carry`. When the stack is empty, the implicit metadata defaults to the constant predicate `Bits(1)(1)` so downstream consumers can treat `meta_cond` uniformly.
 - `get_operand(idx: int)` - Get the operand at the given index
 - `operands` - Get the operands of this expression (property)
 - `as_operand()` - Dump the expression as an operand string
 - `is_binary()` - Check if the opcode is a binary operator
 - `is_unary()` - Check if the opcode is a unary operator  
 - `is_valued()` - Check if this operation has a return value
+- `meta_cond` - Return the stored predicate value guarding this expression. Always resolves to a `Bits(1)` constant `1` when no guard was present at construction time (property)
 
 Internally, the constructor normalizes operands through `_prepare_operand`. Direct references to `Array` or `Port` objects are registered with the operand's `users` list. Expression operands must originate from the same module unless `_is_cross_module_allowed()` explicitly approves the reference. Today the only cross-module exceptions are `PureIntrinsic` nodes for external output reads and `ExternalIntrinsic` handles, which let external SystemVerilog modules share outputs without relaxing other invariants.
 
@@ -67,7 +69,7 @@ Direct storage would only provide forward traversal (Expr → Value). The wrappe
 
 **Fields:**
 - `_value: Value` - The value of this operand
-- `_user: typing.Union[Expr, CondBlock]` - The user of this operand (expressions are common, but guard expressions stored on `CondBlock` instances also reuse Operand)
+- `_user: Expr` - The expression that consumes this operand
 
 **Methods:**
 - `__init__(value: Value, user: Expr)` - Initialize the operand
@@ -85,7 +87,7 @@ Represents consuming a value from a port's FIFO. The resulting data type is deri
 - `FIFO_POP = 301`
 
 **Methods:**
-- `__init__(fifo)` - Initialize FIFO pop operation
+- `__init__(fifo, meta_cond=None)` - Initialize FIFO pop operation
 - `fifo` - Get the FIFO port (property)
 - `dtype` - Get the data type of the popped value (property)
 
@@ -153,11 +155,18 @@ A non-synthesizable node that functions as a print statement for debugging durin
 - `LOG = 600`
 
 **Fields:**
-- `args: tuple` - Arguments to the log operation
+- `args: tuple` - Positional arguments backing the operation.
+
+**Properties:**
+- `fmt` - Returns the format string (`args[0]`).
+- `values` - Returns the payload values to be substituted into the format string (`args[1:-1]`).
+- `dtype` - Get the data type of this operation (void for side-effect operations).
 
 **Methods:**
-- `__init__(*args)` - Initialize log operation
-- `dtype` - Get the data type of this operation (property, returns Void)
+- `__init__(fmt, *values, meta_cond)` - Initialize log operation
+
+**Notes:**
+- `Log` is an ordinary expression node, **not** an intrinsic. The frontend helper relies on the base `Expr` constructor to capture the current predicate carry in `meta_cond` so downstream tools can gate traces without reconstructing the predicate stack.
 
 ### Frontend Functions
 
@@ -172,7 +181,9 @@ The exposed frontend function to instantiate a log operation.
 - `Log` - The log expression node
 
 **Explanation:**
-This function creates a `Log` expression node for debugging purposes. The first argument must be a string format, followed by values to be logged. This is non-synthesizable and only works during simulation.
+This function creates a `Log` expression node for debugging purposes. The first argument must be a string format, followed by values to be logged. It is non-synthesizable and only works during simulation.
+
+On creation the helper captures the builder’s current predicate carry and stores it in `meta_cond`, letting backends reuse the same guard without threading extra operands or reconstructing the predicate stack.
 
 
 ---
@@ -234,8 +245,8 @@ The intentional redundancy in the use-def graph enables critical compiler operat
 - Enables precise timing analysis for pipeline stages
 
 **Dependency Tracking:**
-- Essential for conditional blocks (`CondBlock`) and other control flow
-- The `CondBlock` wraps its condition in an `Operand` to track the dependency
+- Essential for predicate-managed control flow because predicate intrinsics still consume the condition operands
+- Each predicate push intrinsic wraps its condition in an `Operand` to track the dependency
 - Enables proper ordering of operations across different execution contexts
 
 **Multi-Port Write Tracking:**

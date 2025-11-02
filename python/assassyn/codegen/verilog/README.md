@@ -1,6 +1,6 @@
 # SystemVerilog Generator
 
-This backend lowers Assassyn IR into a PyCDE design (`design.py`), compiles it to SystemVerilog, and generates a cocotb/Verilator testbench (`tb.py`). It wires modules via FIFOs, surfaces cross‑module values, and materializes SRAM payloads as simple blackboxes.
+This backend lowers Assassyn IR into a PyCDE design (`design.py`), compiles it to SystemVerilog, and generates a cocotb/Verilator testbench (`tb.py`). It wires modules via FIFOs, surfaces cross‑module values, and materializes memory payloads (detected via `array.owner`) as simple blackboxes.
 
 ## Entry Points
 
@@ -37,47 +37,28 @@ def generate_sram_blackbox_files(sys, path, resource_base=None) -> None
 - Expression lowering (`_expr`): Lowers IR ops and records cross‑module “exposures”.
 - Port synthesis (module.py): Declares module IO based on role (driver/downstream/SRAM) and usage.
 - Cleanup (cleanup.py): Produces `executed_wire`, `finish`, FIFO push/pop, array write muxes, SRAM controls, and `expose_*`/`valid_*`.
-- System assembly (system.py, top.py): Analyzes async callers, arrays, SRAM payloads, externals; generates the `Top` netlist.
+- System assembly (system.py, top.py): Analyzes async callers, arrays, and memory payload ownership alongside externals; generates the `Top` netlist.
 - Elaboration (elaborate.py): Writes `design.py`, compiles SV, emits blackboxes, copies resources, generates the testbench.
 
 ## PyCDE Header
 
-The top of `design.py` defines parameterized wrappers used by `Top`:
+The top of `design.py` imports shared parameterized wrappers used by `Top`:
 
 ```python
 from pycde import Input, Output, Module, System, Clock, Reset, dim
 from pycde import generator, modparams
 from pycde.constructs import Reg, Array, Mux, Wire
 from pycde.types import Bits, SInt, UInt
-
-@modparams
-def FIFO(WIDTH: int, DEPTH_LOG2: int):
-    class FIFOImpl(Module):
-        module_name = "fifo"
-        clk = Clock()
-        rst_n = Input(Bits(1))
-        push_valid = Input(Bits(1))
-        push_data = Input(Bits(WIDTH))
-        pop_ready = Input(Bits(1))
-        push_ready = Output(Bits(1))
-        pop_valid = Output(Bits(1))
-        pop_data = Output(Bits(WIDTH))
-    return FIFOImpl
-
-@modparams
-def TriggerCounter(WIDTH: int):
-    class TriggerCounterImpl(Module):
-        module_name = "trigger_counter"
-        clk = Clock()
-        rst_n = Input(Bits(1))
-        delta = Input(Bits(WIDTH))
-        delta_ready = Output(Bits(1))
-        pop_ready = Input(Bits(1))
-        pop_valid = Output(Bits(1))
-    return TriggerCounterImpl
+from assassyn.pycde_wrapper import FIFO, TriggerCounter, build_register_file
 ```
 
-These map to `fifo.sv` and `trigger_counter.sv` shipped with the backend.
+`assassyn.pycde_wrapper` centralizes PyCDE helpers that back the credit-based pipeline. It exposes:
+
+- `FIFO`: Parameterized depth-tracking FIFO that maps to `fifo.sv`
+- `TriggerCounter`: Credit counter primitive that maps to `trigger_counter.sv`
+- `build_register_file`: Factory that produces multi-port register files matching the Verilog backend’s expectations (write-enable/index/data triplets plus optional read indices)
+
+Keeping these definitions in a runtime module ensures generated designs and user-authored helpers reuse the same implementations.
 
 ## Design Content
 
@@ -96,8 +77,8 @@ These map to `fifo.sv` and `trigger_counter.sv` shipped with the backend.
 
 ### CIRCTDumper Walkthrough
 
-- `visit_system` builds: `array_write_port_mapping`, `async_callees` (callee→callers), `downstream_dependencies` (downstream→upstreams), `array_users`, external wrappers, and SRAM metadata. Then visits modules and emits `Top`.
-- `visit_module` walks the body (via `_expr`), declares ports (`generate_module_ports`), then emits handshakes and gating (`cleanup_post_generation`) inside `construct`.
+- `visit_system` builds: `array_metadata`, external wrappers, SRAM metadata, and the cross-module exposure tables required for external wiring. Async-call and downstream dependencies are consumed from the frozen metadata and analysis helpers during module and top-level emission.
+- `visit_module` walks the body (via `_expr`), declares ports (`generate_module_ports`, which infers roles and metadata internally), then emits handshakes and gating (`cleanup_post_generation`) inside `construct`.
 - `visit_block` tracks nested predicates for conditional and cycled blocks so `Log`/`FINISH`/FIFO ops inherit the correct guards.
 
 ### Expression Lowering
@@ -113,7 +94,7 @@ These map to `fifo.sv` and `trigger_counter.sv` shipped with the backend.
 
 ## Handshake & Scheduling
 
-- `executed_wire` gates side‑effects each cycle:
+- `executed_wire` gates side‑effects each cycle (built through `_format_reduction_expr` so OR / AND reductions share the same formatting):
   - Drivers: `trigger_counter_pop_valid [& WAIT_UNTIL]`
   - Downstreams: OR of upstream `inst_<dep>.executed`
 - FIFO push (producer of `<C>.<p>`):

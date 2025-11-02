@@ -9,6 +9,18 @@ For simulator implementation, see [simulator.md](./simulator.md).
 
 Assassyn generates Verilog code that implements the credit-based pipeline architecture described in [arch.md](../arch/arch.md). The key challenge in Verilog generation is translating the high-level execution model into synthesizable hardware that maintains the same behavior.
 
+### Analysis Pre-pass
+
+Before any Verilog is emitted the backend now performs a dedicated metadata pre-pass:
+
+1. `collect_fifo_metadata` instantiates a lightweight `FIFOAnalysisVisitor` that walks every module body, recording each array read/write and FIFO push/pop interaction’s predicate carry (`expr.meta_cond`), FINISH intrinsics, async calls, and cross-module exposures. Predicates remain raw IR values, so emission reuses the exact same guards.
+2. The visitor populates an `InteractionMatrix` plus `ModuleMetadata` records; the matrix owns shared interaction tuples (accessible via module and resource views) and the `AsyncLedger` that groups async calls by callee, while the module metadata captures FINISH sites, async call lists, and value exposures. In parallel, `collect_external_metadata` builds an `ExternalRegistry` holding external classes, instance ownership, and cross-module reads. All of these types live in the split metadata package and remain available via `python.assassyn.codegen.verilog.metadata`. The resulting snapshot (array/FIFO traffic, external metadata, FINISH flags, async trigger lists, value exposures) is handed directly to the dumper constructor.
+3. Callers that need a partial refresh can analyse a subset of modules and merge the returned metadata without mutating previously produced registries during code emission.
+
+This separation removes runtime bookkeeping from code emission and guarantees that cleanup, module port generation, and top-level wiring all consult a consistent dataset.
+
+Cleanup now routes both array writes and FIFO pushes through a shared `_emit_predicate_mux_chain` helper, so the metadata-derived predicates feed a single implementation of the reduction-and-mux pattern. The helper collapses single-entry collections to a passthrough assignment and lets callers supply deterministic defaults for the empty case, keeping enable signals and data selection aligned with the prioritisation defined during IR construction without sprinkling ad-hoc guards across call sites.
+
 ## Credit-based Flow Control Implementation
 
 The credit system is implemented using counters and control logic. Each pipeline stage has:
@@ -106,6 +118,10 @@ module fifo #(
 endmodule
 ```
 
+### PyCDE Runtime Helpers
+
+The generated `design.py` imports reusable PyCDE helpers from `assassyn.pycde_wrapper`. This module defines the parameterized `FIFO` and `TriggerCounter` classes using `@modparams`, mirroring the handwritten templates above. Centralizing the definitions prevents divergent copies of these primitives between generated designs and user-authored PyCDE code.
+
 ## Combinational Downstream Modules
 
 Downstream modules are implemented as pure combinational logic. The key considerations are:
@@ -175,6 +191,8 @@ module reg_array #(
     assign read_data = memory[read_addr];
 endmodule
 ```
+
+When an array belongs to a memory instance and `array.is_payload(memory)` returns `True`, the backend bypasses this generic module entirely and instead emits the specialised SRAM/DRAM wrappers that expose memory-specific handshakes. Ownership metadata is now identity-based, enabling the backend to distinguish payload buffers from standard registers without dedicated descriptor classes.
 
 ## Clock Domain and Timing
 

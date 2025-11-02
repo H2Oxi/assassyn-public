@@ -35,16 +35,16 @@ The IR node class for FIFO push operations, representing the sending of data to 
 
 #### Methods
 
-#### `__init__(self, fifo, val)`
+#### `__init__(self, fifo, val, meta_cond=None)`
 
 ```python
-def __init__(self, fifo, val):
-    super().__init__(FIFOPush.FIFO_PUSH, [fifo, val])
+def __init__(self, fifo, val, meta_cond=None):
+    super().__init__(FIFOPush.FIFO_PUSH, [fifo, val], meta_cond=meta_cond)
     self.bind = None
     self.fifo_depth = None
 ```
 
-**Explanation:** Initializes a FIFO push operation with the target FIFO port and value to push. The `bind` and `fifo_depth` attributes are initially None and are set by the `Bind` class when managing FIFO configurations.
+**Explanation:** Initializes a FIFO push operation with the target FIFO port, value to push, and optional predicate metadata. The `bind` and `fifo_depth` attributes are initially None and are set by the `Bind` class when managing FIFO configurations. When constructed through the frontend (e.g., `Port.push()` or `Bind._push()`), `meta_cond` defaults to the active predicate returned by [`get_pred()`](../intrinsic.md#get_pred).
 
 #### `fifo` (property)
 
@@ -85,10 +85,14 @@ def dtype(self):
 ```python
 def __repr__(self):
     handle = self.as_operand()
-    return f'{self.fifo.as_operand()}.push({self.val.as_operand()}) // handle = {handle}'
+    meta = self.meta_cond
+    meta_repr = ''
+    if meta is not None:
+        meta_repr = f' // meta cond {meta.as_operand() if hasattr(meta, \"as_operand\") else meta}'
+    return f'{self.fifo.as_operand()}.push({self.val.as_operand()}) // handle = {handle}{meta_repr}'
 ```
 
-**Explanation:** Returns a human-readable string representation of the FIFO push operation in the format `fifo.push(value) // handle = handle`.
+**Explanation:** Returns a human-readable string representation of the FIFO push operation in the format `fifo.push(value) // handle = handle // meta cond predicate`, surfacing the predicate metadata alongside the handle for debugging.
 
 ### class Bind
 
@@ -128,7 +132,7 @@ def _push(self, **kwargs):
         self.pushes.append(push)
 ```
 
-**Explanation:** Internal method that creates FIFOPush operations for each keyword argument. Each push operation is associated with this bind operation and added to the pushes list.
+**Explanation:** Internal method that creates FIFOPush operations for each keyword argument. Each push operation is associated with this bind operation and added to the pushes list. The underlying port helpers automatically populate the push's `meta_cond` with the current predicate, so every bound argument preserves its guard.
 
 #### `bind(self, **kwargs)`
 
@@ -252,12 +256,12 @@ The IR node class for async call operations, representing the asynchronous invoc
 #### `__init__(self, bind: Bind)`
 
 ```python
-def __init__(self, bind: Bind):
-    super().__init__(AsyncCall.ASYNC_CALL, [bind])
+def __init__(self, bind: Bind, meta_cond=None):
+    super().__init__(AsyncCall.ASYNC_CALL, [bind], meta_cond=meta_cond)
     bind.callee.users.append(self)
 ```
 
-**Explanation:** Initializes an async call operation with a bind operation. Adds this call to the callee module's users list to track dependencies for [topological ordering](../../../docs/design/pipeline.md).
+**Explanation:** Initializes an async call operation with a bind operation and optional predicate metadata. Adds this call to the callee module's users list to track dependencies for [topological ordering](../../../docs/design/pipeline.md). `Bind.async_called()` automatically captures the active predicate (`get_pred()`) and passes it as `meta_cond`.
 
 #### `bind` (property)
 
@@ -287,10 +291,14 @@ def dtype(self):
 ```python
 def __repr__(self):
     bind = self.bind.as_operand()
-    return f'async_call {bind}'
+    meta = self.meta_cond
+    meta_repr = ''
+    if meta is not None:
+        meta_repr = f' // meta cond {meta.as_operand() if hasattr(meta, \"as_operand\") else meta}'
+    return f'async_call {bind}{meta_repr}'
 ```
 
-**Explanation:** Returns a human-readable string representation of the async call operation in the format `async_call bind_operation`.
+**Explanation:** Returns a human-readable string representation of the async call operation in the format `async_call bind_operation // meta cond predicate`, making the predicate explicit for debugging.
 
 ---
 

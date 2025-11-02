@@ -1,6 +1,6 @@
 '''The AST node data structure for the expressions'''
 
-#pylint: disable=cyclic-import,import-outside-toplevel
+#pylint: disable=cyclic-import,import-outside-toplevel,too-many-instance-attributes
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ from ...utils import namify, identifierize
 if typing.TYPE_CHECKING:
     from ..array import Array
     from ..module import Port, Module
+    from ..module.base import ModuleBase
     from ..dtype import DType
-    from ..block import Block, CondBlock
 
 class Operand:
     '''The base class for all operands. It is used to dump the operand as a string.'''
     _value: Value # The value of this operand
-    _user: typing.Union[Expr, CondBlock] # The user of this operand
+    _user: Expr # The user of this operand
 
     def __init__(self, value: Value, user: Expr):
         self._value = value
@@ -44,13 +44,13 @@ class Expr(Value):
 
     opcode: int  # Operation code for this expression
     loc: str  # Source location information
-    parent: typing.Optional[Block]  # Parent block of this expression
+    parent: typing.Optional[ModuleBase]  # Parent module of this expression
     users: typing.List[Operand]  # List of users of this expression
     _operands: typing.List[
         typing.Union[Operand, Port, Array, int]
     ] # List of operands of this expression
 
-    def __init__(self, opcode, operands: list):
+    def __init__(self, opcode, operands: list, *, meta_cond: typing.Optional[Value] = None):
         '''Initialize the expression with an opcode'''
         #pylint: disable=import-outside-toplevel,too-many-locals
         self.opcode = opcode
@@ -61,6 +61,24 @@ class Expr(Value):
         for operand in operands:
             self._operands.append(self._prepare_operand(operand))
         self.users = []
+        override = self._normalize_meta_cond(meta_cond)
+        if override is not None:
+            self._meta_cond = override
+        else:
+            self._meta_cond = self._resolve_ambient_meta_cond()
+
+    @staticmethod
+    def _normalize_meta_cond(value: typing.Optional[Value]):
+        return value.value if isinstance(value, Operand) else value
+
+    def _resolve_ambient_meta_cond(self):
+        try:
+            # pylint: disable=import-outside-toplevel
+            from ...builder import Singleton
+            builder = Singleton.peek_builder()
+        except (RuntimeError, ImportError):
+            return None
+        return self._normalize_meta_cond(builder.current_predicate_carry())
 
     def _prepare_operand(self, operand):
         '''Normalize an incoming operand and register its usage'''
@@ -77,7 +95,8 @@ class Expr(Value):
             return operand
 
         if isinstance(operand, Expr):
-            return self._prepare_expr_operand(operand, Singleton.builder.current_module)
+            builder = Singleton.peek_builder()
+            return self._prepare_expr_operand(operand, builder.current_module)
 
         if isinstance(operand, (Const, str, RecordValue, Module, Downstream)):
             return Operand(operand, self)
@@ -96,7 +115,7 @@ class Expr(Value):
             return wrapped
 
         if not isinstance(current_module, Downstream):
-            expr_module = expr_operand.parent.module if expr_operand.parent else None
+            expr_module = expr_operand.parent if expr_operand.parent else None
             if not self._is_cross_module_allowed(expr_operand):
                 assert current_module == expr_module, (
                     f'Expression {expr_operand} is from module {expr_module}, '
@@ -132,6 +151,12 @@ class Expr(Value):
     def operands(self):
         '''Get the operands of this expression'''
         return self._operands
+
+    @property
+    def meta_cond(self):
+        '''Return the cumulative predicate guarding this expression.'''
+        return self._meta_cond
+
 
     def as_operand(self):
         '''Dump the expression as an operand'''
@@ -181,8 +206,12 @@ class FIFOPop(Expr):
 
     FIFO_POP = 301
 
-    def __init__(self, fifo):
-        super().__init__(FIFOPop.FIFO_POP, [fifo])
+    def __init__(self, fifo, meta_cond: typing.Optional[Value] = None):
+        if meta_cond is None:
+            # pylint: disable=import-outside-toplevel
+            from .intrinsic import get_pred
+            meta_cond = get_pred()
+        super().__init__(FIFOPop.FIFO_POP, [fifo], meta_cond=meta_cond)
 
     @property
     def fifo(self):
@@ -195,7 +224,13 @@ class FIFOPop(Expr):
         return self.fifo.dtype
 
     def __repr__(self):
-        return f'{self.as_operand()} = {self.fifo.as_operand()}.pop()'
+        meta = self.meta_cond
+        if meta is None:
+            suffix = ''
+        else:
+            operand = meta.as_operand() if hasattr(meta, 'as_operand') else repr(meta)
+            suffix = f' // meta cond {operand}'
+        return f'{self.as_operand()} = {self.fifo.as_operand()}.pop(){suffix}'
 
     def __getattr__(self, name):
         return self.dtype.attributize(self, name)
@@ -209,9 +244,24 @@ class Log(Expr):
 
     LOG = 600
 
-    def __init__(self, *args):
-        super().__init__(Log.LOG, args)
+    def __init__(self, fmt, *values, meta_cond=None):
+        args = (fmt, *values)
+        if meta_cond is None:
+            # pylint: disable=import-outside-toplevel
+            from .intrinsic import get_pred
+            meta_cond = get_pred()
+        super().__init__(Log.LOG, args, meta_cond=meta_cond)
         self.args = args
+
+    @property
+    def fmt(self):
+        '''Return the format string argument.'''
+        return self.args[0]
+
+    @property
+    def values(self):
+        '''Return the payload values excluding the format string.'''
+        return self.args[1:]
 
     @property
     def dtype(self):
@@ -221,8 +271,20 @@ class Log(Expr):
         return void()
 
     def __repr__(self):
-        fmt = repr(self.args[0])
-        return f'log({fmt}, {", ".join(i.as_operand() for i in self.args[1:])})'
+        fmt = repr(self.fmt)
+        payload = ", ".join(
+            i.as_operand() if hasattr(i, 'as_operand') else repr(i)
+            for i in self.values
+        )
+        base = f'log({fmt}'
+        if payload:
+            base += f', {payload}'
+        base += ')'
+        meta = self.meta_cond
+        if meta is None:
+            return base
+        operand = meta.as_operand() if hasattr(meta, 'as_operand') else repr(meta)
+        return f'{base} // meta cond {operand}'
 
 class Concat(Expr):
     '''The class for concatenation operation, where {msb, lsb} as a right value'''

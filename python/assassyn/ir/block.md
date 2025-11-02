@@ -1,318 +1,77 @@
-# Block Module
+# Predicate Helpers (block.py)
 
 ## Design Documents
 
-- [DSL Design](../../../docs/design/lang/dsl.md) - Trace-based DSL system and block-based control flow
-- [Module Design](../../../docs/design/internal/module.md) - Module generation and control flow
-- [Simulator Design](../../../docs/design/internal/simulator.md) - Simulator design and testbench generation
-- [Pipeline Architecture](../../../docs/design/internal/pipeline.md) - Credit-based pipeline system
+- [DSL Design](../../../docs/design/lang/dsl.md) – Trace-oriented DSL constructs and predicate semantics.
+- [Module Design](../../../docs/design/internal/module.md) – Module representation and body layout.
+- [Simulator Design](../../../docs/design/internal/simulator.md) – Predicate-driven control flow during simulation.
 
 ## Related Modules
 
-- [Builder Singleton](../../builder/__init__.md) - Builder context management system
-- [Expression Base](../expr.md) - Base expression classes
-- [Module Base](../module/base.md) - Base module functionality
+- [Builder Singleton](../../builder/__init__.md) – Maintains module contexts and predicate stacks.
+- [Expression Base](../expr.md) – Base expression hierarchy used inside module bodies.
+- [Module Base](../module/base.md) – Provides `Module.body` and combinational decorator infrastructure.
 
 ## Section 0. Summary
 
-The `block.py` module defines the `Block` class hierarchy for representing control flow blocks in the Assassyn IR. This module implements the block-based control flow system that works with the [builder singleton](../../builder/__init__.py) to manage the current insertion point for IR nodes. Blocks serve as containers for expressions and provide context management through Python's `with` statement, enabling conditional execution and testbench cycle-based execution patterns as described in the [DSL design](../../../docs/design/dsl.md).
+The historical `Block` hierarchy has been removed in favour of a flat module body that directly owns an ordered list of expressions. The `block.py` module now provides only lightweight helpers for predicate management, namely the `Condition` and `Cycle` context managers and the internal `_PredicateScope` wrapper. These helpers emit predicate push/pop intrinsics so that frontend code can continue to guard statements with `with Condition(cond): ...` while the builder records the predicate stack per module context.
 
 ## Section 1. Exposed Interfaces
 
-This section describes all the function interfaces and data structures that are exposed to other parts of the project.
-
-### Data Structures
-
-#### `Block`
+### `Condition(cond)`
 ```python
-class Block:
-    kind: int                                         # Kind of block (MODULE_ROOT, CONDITIONAL, CYCLE)
-    _body: list[Expr]                                # List of instructions in the block
-    parent: typing.Union[typing.Self, ModuleBase]    # Parent block
-    module: typing.Optional[ModuleBase]              # Module of this block
+def Condition(cond: Value) -> ContextManager
 ```
 
-**Purpose:** Base class for all control flow blocks in the Assassyn IR.
-
-**Member Fields:**
-- `kind`: Integer constant defining the block type (MODULE_ROOT, CONDITIONAL, or CYCLE)
-- `_body`: List of `Expr` objects representing the instructions contained in this block
-- `parent`: Reference to the parent block or module that contains this block
-- `module`: Reference to the module that owns this block
-
-**Static Member Fields:**
-- `MODULE_ROOT = 0`: Constant for root blocks of modules
-- `CONDITIONAL = 1`: Constant for conditional execution blocks  
-- `CYCLE = 2`: Constant for cycle-based blocks used in testbench generation
-
-**Block Kind Usage Patterns:**
-
-1. **MODULE_ROOT (0)**: Used for the root block of each module. This block contains all the module's logic and serves as the top-level container for expressions. Created automatically when a module is instantiated.
-
-2. **CONDITIONAL (1)**: Used for conditional execution blocks created by the `Condition()` function. These blocks execute their contents only when the specified condition is true, implementing multiplexer-based conditional logic in the generated hardware.
-
-3. **CYCLE (2)**: Used for testbench generation blocks created by the `Cycle()` function. These blocks execute at specific simulation cycles, enabling precise timing control for testbench operations.
-
-**Note on Block Kind Constants:** These constants are currently defined as integer values. Consider using an enum for better type safety and maintainability in future versions.
-
-#### `CondBlock`
-```python
-class CondBlock(Block):
-    cond: Value  # Condition for this block
-```
-
-**Purpose:** Represents conditional blocks that execute when a condition is true.
-
-**Member Fields:**
-- `cond`: `Value` object representing the condition that determines when this block executes
-
-#### `CycledBlock`
-```python
-class CycledBlock(Block):
-    cycle: int  # Cycle count for this block
-```
-
-**Purpose:** Represents blocks that execute at specific cycles during testbench generation.
-
-**Member Fields:**
-- `cycle`: Integer specifying the cycle number when this block should execute
-
-### Functions
-
-#### `Condition(cond)`
-```python
-@ir_builder(node_type='expr')
-def Condition(cond: Value) -> CondBlock
-```
-
-**Description:** Frontend API for creating a conditional block that executes when the condition is true.
+**Purpose:** Guard a group of statements with the given predicate by emitting `push_condition(cond)` and `pop_condition()` intrinsics around the enclosed statements.
 
 **Parameters:**
-- `cond`: A `Value` representing the condition to evaluate
+- `cond`: A `Value` describing the predicate that must hold for the guarded statements.
 
-**Returns:** `CondBlock` instance that can be used as a context manager
+**Returns:** A context manager that integrates with the builder's predicate stack.
 
-**Explanation:** This function creates a conditional block that integrates with the [builder singleton](../../builder/__init__.py) context management system. When used with a `with` statement, it changes the current insertion point to the conditional block, allowing expressions to be conditionally executed. The condition is evaluated at runtime in the generated hardware, creating a multiplexer-based conditional execution path as described in the [module generation design](../../../docs/design/module.md).
+**Explanation:** Entering the context pushes the predicate onto the active module's predicate stack (and emits the corresponding intrinsic IR node). All IR created while the context is active is therefore conditionally executed. Exiting the context pops the predicate and emits the matching `pop_condition` intrinsic. This mirrors legacy conditional blocks without maintaining a dedicated block AST node.
 
 **Example:**
 ```python
 with Condition(enable_signal):
-    # Instructions execute when enable_signal is true
-    output.next = input_data
+    log("Enabled value: {}", enable_signal)
 ```
 
-#### `Cycle(cycle)`
+### `Cycle(cycle)`
 ```python
-@ir_builder(node_type='expr')
-def Cycle(cycle: int) -> CycledBlock
+def Cycle(cycle: int) -> ContextManager
 ```
 
-**Description:** Frontend API for creating a cycled block for testbench generation that executes at a specific cycle.
+**Purpose:** Sugar for guarding statements with `current_cycle() == cycle`. Useful for testbench-like scheduling written in the frontend.
 
 **Parameters:**
-- `cycle`: Integer cycle number when the block should execute
+- `cycle`: Absolute cycle number that should trigger the guarded statements.
 
-**Returns:** `CycledBlock` instance that can be used as a context manager
-
-**Explanation:** This function creates a cycle-based block used specifically for testbench generation. The block executes at the specified cycle during simulation, allowing testbench logic to be scheduled at precise timing points. This is used in conjunction with the [simulator design](../../../docs/design/simulator.md) to coordinate testbench events.
+**Returns:** A `Condition` context manager equivalent to `Condition(current_cycle() == UInt(64)(cycle))`.
 
 **Example:**
 ```python
 with Cycle(10):
-    # Instructions execute at cycle 10
-    test_signal.next = UInt(1, 1)
+    finish()
 ```
 
 ## Section 2. Internal Helpers
 
-This section describes all the function interfaces and data structures that are implemented internally within this source code unit.
-
-### `Block` Class Methods
-
-#### `__init__(self, kind)`
+### `_PredicateScope`
 ```python
-def __init__(self, kind: int)
+class _PredicateScope:
+    def __enter__(self)
+    def __exit__(self, exc_type, exc_value, traceback)
 ```
 
-**Description:** Creates a new block of the specified kind with empty body.
+**Purpose:** Minimal context manager used by both `Condition` and `Cycle`. Its body pushes the predicate via `push_condition` on enter and pops it on exit. The scope delegates predicate-stack management to `SysBuilder`, ensuring the array-read cache and other predicate-sensitive data stay aligned with the active predicates.
 
-**Parameters:**
-- `kind`: Integer constant defining the block type (MODULE_ROOT, CONDITIONAL, or CYCLE)
+**Design Notes:**
+- The scope is intentionally lightweight; it does not attempt to manage insertion points or additional builder context.
+- All mutation is driven by the intrinsic helper functions in `ir.expr.intrinsic`, keeping predicate semantics concentrated in one module.
 
-**Explanation:** Initializes a new block with the specified kind, creates an empty body list, and sets parent and module references to None. This is the base constructor for all block types.
+### Implementation Considerations
 
-#### `body` Property
-```python
-@property
-def body(self) -> list[Expr]
-```
-
-**Description:** Returns the list of instructions contained in the block.
-
-**Returns:** List of `Expr` objects representing the block's instructions.
-
-**Explanation:** Provides read-only access to the block's body. The body is stored as `_body` internally to prevent direct modification, ensuring proper encapsulation.
-
-#### `as_operand(self)`
-```python
-def as_operand(self) -> str
-```
-
-**Description:** Returns a string representation of the block for use as an operand in code generation.
-
-**Returns:** String in the format `_{namified_identifier}`.
-
-**Explanation:** Converts the block to a string representation suitable for use as an operand in generated code. Uses the `namify` and `identifierize` utilities to create a valid identifier.
-
-#### `insert(self, x, elem)`
-```python
-def insert(self, x: int, elem: Expr)
-```
-
-**Description:** Inserts an instruction at the given position in the block's body.
-
-**Parameters:**
-- `x`: Integer position where to insert the instruction
-- `elem`: `Expr` object to insert
-
-**Explanation:** Directly modifies the block's body by inserting an expression at the specified position. This is used internally by the builder system when managing instruction ordering.
-
-#### `iter(self)`
-```python
-def iter(self)
-```
-
-**Description:** Generator that yields each instruction in the block's body.
-
-**Yields:** `Expr` objects from the block's body.
-
-**Explanation:** Provides iteration support for blocks, allowing them to be used in for loops and other iteration contexts. This is used by the `__repr__` method to display block contents.
-
-#### `__enter__(self)`
-```python
-def __enter__(self) -> Block
-```
-
-**Description:** Sets up the block context when entering a `with` statement.
-
-**Returns:** The block instance for use in the `with` statement.
-
-**Explanation:** Implements the context manager protocol for blocks. Establishes parent-child relationships by assigning the current block/module as parent, sets the module reference from the builder singleton, and switches the builder context to this block. This enables the block to become the current insertion point for new IR nodes. The method includes assertions to ensure safe nesting of blocks.
-
-**Builder Context Management Integration:** The block system integrates with the builder singleton through a context stack mechanism:
-
-1. **Context Entry**: When entering a block via `__enter__()`, the block calls `Singleton.builder.enter_context_of('block', self)` to push itself onto the context stack
-2. **Context Exit**: When exiting a block via `__exit__()`, the block calls `Singleton.builder.exit_context_of('block')` to pop itself from the context stack
-3. **Nested Blocks**: The context stack allows for proper nesting of blocks, with each block maintaining its own insertion point
-4. **Error Handling**: The context management includes assertions to prevent invalid nesting scenarios and ensure proper cleanup
-
-**Error Conditions:**
-- `AssertionError`: Raised if block nesting depth exceeds safe limits
-- Context management errors: May occur if builder singleton is not properly initialized
-- Module reference errors: May occur if module context is not available when entering blocks
-
-#### `__exit__(self, exc_type, exc_value, traceback)`
-```python
-def __exit__(self, exc_type, exc_value, traceback)
-```
-
-**Description:** Cleans up the block context when exiting a `with` statement.
-
-**Parameters:** Standard exception handling parameters (exc_type, exc_value, traceback)
-
-**Explanation:** Implements the context manager protocol for blocks. Restores the previous builder context by calling `exit_context_of('block')` on the builder singleton, effectively popping this block from the context stack and returning to the previous insertion point.
-
-#### `__repr__(self)`
-```python
-def __repr__(self) -> str
-```
-
-**Description:** Returns a formatted string representation of the block with proper indentation for nested structures.
-
-**Returns:** Indented string showing the block's contents.
-
-**Explanation:** Creates a formatted string representation of the block for debugging and display purposes. Uses the `Singleton.repr_ident` to maintain proper indentation levels for nested blocks. The representation shows all expressions contained in the block's body.
-
-**Global State Management for String Representation:** The `__repr__` methods use `Singleton.repr_ident` for indentation, which creates a global state management pattern:
-
-1. **Global Indentation Counter**: All block types modify the global `Singleton.repr_ident` counter for indentation
-2. **Thread Safety Considerations**: This global state approach may not be thread-safe and could cause issues in multi-threaded environments
-3. **Nested Block Indentation**: The indentation system works correctly for nested blocks but relies on global state
-4. **Alternative Approaches**: Consider using a more localized approach or thread-local storage for better isolation
-
-**Error Conditions:**
-- Global state conflicts: May occur if multiple threads access the global indentation counter simultaneously
-- Indentation errors: May occur if the global state is not properly managed across nested blocks
-
-### `CondBlock` Class Methods
-
-#### `__init__(self, cond)`
-```python
-def __init__(self, cond: Value)
-```
-
-**Description:** Creates a conditional block that executes when the condition is true.
-
-**Parameters:**
-- `cond`: `Value` representing the condition to evaluate
-
-**Explanation:** Initializes a conditional block by calling the parent constructor with `Block.CONDITIONAL` kind. Wraps the condition in an `Operand` object and establishes the user relationship if the condition is an expression. This ensures proper dependency tracking in the IR.
-
-**Operand Wrapping and User Relationship Management:** The `CondBlock.__init__` method implements a specific pattern for managing operand relationships:
-
-1. **Operand Wrapping**: The condition is wrapped in an `Operand` object using `Operand(cond, self)`, creating a directed link between the condition value and the block
-2. **User Relationship**: If the condition is an `Expr` object, the block is added to the condition's users list via `cond.users.append(self.cond)`
-3. **Dependency Tracking**: This pattern ensures that the IR maintains proper use-def relationships, enabling dataflow analysis and optimization
-4. **Consistency**: This pattern should be consistent across all block types that reference external values
-
-**Error Conditions:**
-- Type errors: May occur if the condition is not a valid `Value` object
-- Dependency tracking errors: May occur if user relationships are not properly established
-
-#### `__repr__(self)`
-```python
-def __repr__(self) -> str
-```
-
-**Description:** Returns a formatted representation showing the condition and block contents.
-
-**Returns:** String in the format `when {condition} { ... }`.
-
-**Explanation:** Creates a formatted string representation of the conditional block, showing the condition and the block's contents with proper indentation. Uses the parent's `__repr__` method to display the block body.
-
-### `CycledBlock` Class Methods
-
-#### `__init__(self, cycle)`
-```python
-def __init__(self, cycle: int)
-```
-
-**Description:** Creates a cycled block for testbench generation that executes at a specific cycle.
-
-**Parameters:**
-- `cycle`: Integer cycle number when the block should execute
-
-**Explanation:** Initializes a cycled block by calling the parent constructor with `Block.CYCLE` kind and stores the cycle number. This type of block is used specifically for testbench generation to schedule operations at precise timing points.
-
-**Testbench Integration:** The `CycledBlock` integrates with the testbench system for precise timing control:
-
-1. **Cycle-Based Execution**: The block executes at the specified cycle number during simulation
-2. **Testbench Coordination**: Used in conjunction with the [simulator design](../../../docs/design/internal/simulator.md) to coordinate testbench events
-3. **Timing Control**: Enables precise timing control for testbench operations, allowing operations to be scheduled at specific simulation cycles
-4. **Validation**: The cycle number should be non-negative and within reasonable bounds for the simulation
-
-**Error Conditions:**
-- Invalid cycle numbers: May occur if negative or extremely large cycle numbers are provided
-- Testbench coordination errors: May occur if the testbench system is not properly initialized
-- Timing conflicts: May occur if multiple blocks are scheduled for the same cycle without proper coordination
-
-#### `__repr__(self)`
-```python
-def __repr__(self) -> str
-```
-
-**Description:** Returns a formatted representation showing the cycle number and block contents.
-
-**Returns:** String in the format `cycle {number} { ... }`.
-
-**Explanation:** Creates a formatted string representation of the cycled block, showing the cycle number and the block's contents with proper indentation. Uses the parent's `__repr__` method to display the block body.
+- Because module bodies are plain lists, predicate intrinsics appear inline alongside other expressions. Consumers such as visitors and code generators should treat them as structural markers and handle indentation or gating logic accordingly.
+- Removing structural blocks simplifies IR traversal: visitors iterate directly over `Module.body` and react to predicate intrinsics instead of recursing into nested block objects.

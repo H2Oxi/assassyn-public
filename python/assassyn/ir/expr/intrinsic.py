@@ -9,6 +9,8 @@ INTRIN_INFO = {
     900: ('wait_until', 1, False, True),
     901: ('finish', 0, False, True),
     902: ('assert', 1, False, True),
+    914: ('PUSH_CONDITION', 1, False, True),
+    915: ('POP_CONDITION', 0, False, True),
     906: ('send_read_request', 3, True, True),
     908: ('send_write_request', 4, True, True),
     913: ('external_instantiate', None, True, True),  # None = variable args
@@ -16,6 +18,7 @@ INTRIN_INFO = {
 
 PURE_INTRIN_INFO = {
     # PureIntrinsic operations opcode: (mnemonic, num of args)
+    307: ('current_cycle', 0),
     306: ('external_output_read', None),  # (instance, port_name[, index]) - variable args
     904: ('has_mem_resp', 1),
     912: ('get_mem_resp', 1),
@@ -30,20 +33,24 @@ class Intrinsic(Expr):
     SEND_READ_REQUEST = 906
     SEND_WRITE_REQUEST = 908
     EXTERNAL_INSTANTIATE = 913
+    PUSH_CONDITION = 914
+    POP_CONDITION = 915
 
     opcode: int  # Operation code for this intrinsic
 
-    def __init__(self, opcode, *args):
-        super().__init__(opcode, args)
+    def __init__(self, opcode, *args, meta_cond=None):
+        payload = list(args)
         _, num_args, _, _ = INTRIN_INFO[opcode]
         # num_args can be None for variable-length args (like EXTERNAL_INSTANTIATE)
         if num_args is not None:
-            assert len(args) == num_args
+            assert len(payload) == num_args
+        super().__init__(opcode, payload, meta_cond=meta_cond)
+        self._payload_len = len(payload)
 
     @property
     def args(self):
         '''Get the arguments of this intrinsic.'''
-        return self._operands
+        return self._operands[:self._payload_len]
     @property
     def dtype(self):
         '''Get the data type of this intrinsic.'''
@@ -112,6 +119,27 @@ def send_write_request(mem, we, addr, data):
     return Intrinsic(Intrinsic.SEND_WRITE_REQUEST, mem, we, addr, data)
 
 
+@ir_builder
+def push_condition(cond):
+    '''Push a predicate condition to the builder condition stack and IR.'''
+    #pylint: disable=import-outside-toplevel
+    from ..value import Value
+    from ...builder import Singleton
+    assert isinstance(cond, Value)
+    # Mirror into builder predicate stack for frontend semantics (per module)
+    Singleton.peek_builder().push_predicate(cond)
+    return Intrinsic(Intrinsic.PUSH_CONDITION, cond)
+
+
+@ir_builder
+def pop_condition():
+    '''Pop a predicate condition from the builder condition stack and IR.'''
+    #pylint: disable=import-outside-toplevel
+    from ...builder import Singleton
+    Singleton.peek_builder().pop_predicate()
+    return Intrinsic(Intrinsic.POP_CONDITION)
+
+
 
 @ir_builder
 def get_mem_resp(mem):
@@ -127,6 +155,7 @@ class PureIntrinsic(Expr):
     FIFO_PEEK  = 303
     MODULE_TRIGGERED = 304
     VALUE_VALID = 305
+    CURRENT_CYCLE = 307
 
     # External module operations
     EXTERNAL_OUTPUT_READ = 306  # Unified opcode for both wire and reg outputs
@@ -145,26 +174,27 @@ class PureIntrinsic(Expr):
         VALUE_VALID: 'valid',
     }
 
-    def __init__(self, opcode, *args):
+    def __init__(self, opcode, *args, meta_cond=None):
         operands = list(args)
-        super().__init__(opcode, operands)
         # Validate arguments for operations with defined arg counts
         if opcode in PURE_INTRIN_INFO:
             _, num_args = PURE_INTRIN_INFO[opcode]
             if num_args is not None:
                 assert len(args) == num_args, \
                     f"Expected {num_args} args for opcode {opcode}, got {len(args)}"
+        super().__init__(opcode, operands, meta_cond=meta_cond)
+        self._payload_len = len(operands)
 
     @property
     def args(self):
         '''Get the arguments of this intrinsic'''
-        return self._operands
+        return self._operands[:self._payload_len]
 
     @property
     def dtype(self):
         '''Get the data type of this intrinsic'''
         # pylint: disable=import-outside-toplevel
-        from ..dtype import Bits
+        from ..dtype import Bits, UInt
 
         if self.opcode == PureIntrinsic.FIFO_PEEK:
             # pylint: disable=import-outside-toplevel
@@ -180,6 +210,9 @@ class PureIntrinsic(Expr):
         if self.opcode == PureIntrinsic.GET_MEM_RESP:
             return Bits(self.args[0].width)
 
+        if self.opcode == PureIntrinsic.CURRENT_CYCLE:
+            return UInt(64)
+
         if self.opcode == PureIntrinsic.EXTERNAL_OUTPUT_READ:
             # args[0] is ExternalIntrinsic instance, args[1] is port name
             # args[2] (optional) is index for RegOut
@@ -194,7 +227,8 @@ class PureIntrinsic(Expr):
                            PureIntrinsic.MODULE_TRIGGERED, PureIntrinsic.VALUE_VALID]:
             fifo = self.args[0].as_operand()
             return f'{self.as_operand()} = {fifo}.{self.OPERATORS[self.opcode]}()'
-        if self.opcode in [PureIntrinsic.HAS_MEM_RESP, PureIntrinsic.GET_MEM_RESP]:
+        if self.opcode in [PureIntrinsic.HAS_MEM_RESP, PureIntrinsic.GET_MEM_RESP,
+                           PureIntrinsic.CURRENT_CYCLE]:
             mn, _ = PURE_INTRIN_INFO[self.opcode]
             args = ", ".join(i.as_operand() for i in self.args)
             return f'{self.as_operand()} = pure_intrinsic.{mn}({args})'
@@ -216,6 +250,23 @@ class PureIntrinsic(Expr):
             return port.dtype.attributize(self, name)
 
         assert False, f"Cannot access attribute {name} on {self}"
+
+
+@ir_builder
+def current_cycle():
+    '''Frontend API to get current global cycle (UInt(64)).'''
+    return PureIntrinsic(PureIntrinsic.CURRENT_CYCLE)
+
+
+## CURRENT_CYCLE alias removed; use current_cycle() instead.
+
+
+# Frontend helper: get_pred (no opcode)
+def get_pred():
+    '''Get the current predicate as AND of builder condition stack.'''
+    #pylint: disable=import-outside-toplevel
+    from ...builder import Singleton
+    return Singleton.peek_builder().current_predicate_carry()
 
 
 class ExternalIntrinsic(Intrinsic):

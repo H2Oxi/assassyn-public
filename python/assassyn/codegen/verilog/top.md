@@ -20,6 +20,11 @@ This module provides top-level harness generation for Verilog designs, creating 
 
 The top-level harness generation module creates the complete system-level Verilog module that serves as the top-level of the design. It handles the instantiation and connection of all system components, including regular modules, downstream modules, SRAM modules, multi-port arrays, FIFOs, trigger counters, and external modules, while managing the complex interconnections required by the credit-based pipeline architecture.
 
+Metadata lookups referenced throughout (array usage, module interactions, FIFO
+projections) flow from the `python.assassyn.codegen.verilog.metadata` package, whose
+submodules (`metadata.core`, `metadata.array`, `metadata.module`, `metadata.fifo`)
+provide the concrete implementations behind the familiar `metadata` namespace imports.
+
 ## Exposed Interfaces
 
 ### `generate_top_harness`
@@ -63,7 +68,7 @@ This function generates the complete top-level Verilog module that serves as the
    - **Regular Modules**: Connected to trigger counters and FIFO ports
    - **Downstream Modules**: Connected to dependency signals and external values
    - **SRAM Modules**: Connected to memory interfaces
-   - **External Modules**: Hooked up through helper routines that splice in cross-module wires derived from both `module.externals` and the cross-module metadata precomputed during system analysis, and avoid duplicating instantiations
+   - **External Modules**: Hooked up through helper routines that splice in cross-module wires derived from both `module.externals` and the cross-module metadata precomputed during system analysis, and avoid duplicating instantiations. Producer discovery now checks whether `expr.parent` is already a module—reflecting the block removal refactor—before consulting legacy `.module` fields so mixed IR shapes continue to work.
 
 7. **Module Connections**: Creates all inter-module connections:
    - **FIFO Connections**: Push/pop signal routing between modules
@@ -72,7 +77,7 @@ This function generates the complete top-level Verilog module that serves as the
    - **Memory Connections**: SRAM interface signal routing
 
 8. **Global Finish Signal**: Collects finish signals from all modules using metadata-based detection (O(1) lookup via `module_metadata`), avoiding redundant expression walking, and creates global finish. See [metadata module](/python/assassyn/codegen/verilog/metadata.md) for implementation details.
-   Additionally, FIFO depth selection no longer walks expressions; it computes depths from the `pushes` recorded in `module_metadata` during expression generation.
+  Additionally, FIFO depth selection no longer walks expressions; it computes depths from the predicated push expressions stored in the shared `InteractionMatrix` (queried via `dumper.interactions.fifo_view(port).pushes`), with `module_metadata.interactions.pushes` serving as the module-scoped projection of the same tuples.
 
 9. **Unused Port Tie-off**: Ties off unused FIFO push ports to prevent floating signals
 
@@ -85,11 +90,11 @@ This function generates the complete top-level Verilog module that serves as the
 The function handles complex system-wide relationships:
 
 - **Multi-Port Array Management**: Ensures proper write port assignment and connection
-- **FIFO Depth Configuration**: Determines FIFO depths from `module_metadata.pushes` (no expression walking)
+- **FIFO Depth Configuration**: Determines FIFO depths from `dumper.interactions.fifo_view(port).pushes` (no expression walking, predicate context preserved for downstream analysis, and the data is mirrored by the module-scoped interaction view)
 - **External Module Integration**: Properly integrates external SystemVerilog modules
   by:
   - Declaring shared wires once per exposed external value (data + valid), using the normalised wire keys emitted by the intrinsic lowering pass
-  - Routing assignments based on the intrinsic-derived `node.externals` list and the additional consumer wiring recorded in `cross_module_external_reads` so instantiations stay in emission order and each producer drives a single pair of signals
+  - Routing assignments based on the intrinsic-derived `node.externals` list and the additional consumer wiring recorded in `external_metadata.cross_module_reads` so instantiations stay in emission order and each producer drives a single pair of signals
 - **Dependency Management**: Handles downstream module dependencies
 - **Credit-based Pipeline**: Implements proper trigger counter and credit management
 
@@ -108,20 +113,16 @@ The function uses several utility functions and data structures:
 - `dump_type()` and `dump_type_cast()` from [utils module](/python/assassyn/codegen/verilog/utils.md) for type handling
 - `get_sram_info()` from [utils module](/python/assassyn/codegen/verilog/utils.md) for SRAM information
 - `namify()` and `unwrap_operand()` from [utils module](/python/assassyn/utils.md) for name generation
-- `topo_downstream_modules()` from [analysis module](/python/assassyn/analysis/external_usage.md) for topological ordering
+- `topo_downstream_modules()` and `get_upstreams()` from [analysis module](/python/assassyn/analysis/external_usage.md) for topological ordering and dependency discovery
 - `get_external_port_name()` from [CIRCTDumper](/python/assassyn/codegen/verilog/design.md) for external port naming
-- Metadata-driven checks for `FIFOPop` readiness: `_walk_expressions()` is no longer used to detect whether a module pops a FIFO. Instead, the `pops` list in `module_metadata` is consulted to decide if `<port>_pop_ready` connections should be emitted.
-- `_is_external_module()` from [CIRCTDumper](/python/assassyn/codegen/verilog/design.md) for external module detection
+- Metadata-driven checks for `FIFOPop` readiness: the predicated pop entries surfaced from `module_metadata.interactions.pops` (backed by the same tuples returned from `dumper.interactions.fifo_view(port).pops`) determine whether `<port>_pop_ready` connections should be emitted, replacing the legacy dumper helper traversal.
 - `_connect_array()` from [CIRCTDumper](/python/assassyn/codegen/verilog/design.md) for array connections
 
 The function manages several CIRCTDumper state variables:
 
 - `memory_defs`: SRAM memory definitions
-- `array_write_port_mapping`: Array write port assignments
-- `downstream_dependencies`: Downstream module dependencies
-- `async_callees`: Async call relationships
-- `array_users`: Array usage mapping
-- `sram_payload_arrays`: SRAM payload arrays
+- `array_metadata`: Registry containing array write/read port assignments and usage
+- `async_callers(module)`: Helper forwarding to the async-call ledger for trigger aggregation and driver detection
 
 **Project-specific Knowledge Required**:
 - Understanding of [CIRCTDumper state management](/python/assassyn/codegen/verilog/design.md)

@@ -67,10 +67,10 @@ def test_record():
         check_raw,
         sim_threshold=200,
         idle_threshold=200,
-        random=True
+        random=True,
+        verilog=True
     )
 
 
 if __name__ == '__main__':
     test_record()
-

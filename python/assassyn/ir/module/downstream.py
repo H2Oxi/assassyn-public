@@ -1,15 +1,22 @@
 '''Downstream class is a special module that is combinational across multiple different
 chronological modules.'''
 
-from .base import ModuleBase, combinational_for
-from ..block import Block
+from __future__ import annotations
+
+import typing
+
 from ...builder import Singleton
+from .base import ModuleBase, combinational_for, render_module_body
+
+if typing.TYPE_CHECKING:
+    from ..expr import Expr
+
 
 class Downstream(ModuleBase):
     '''Downstream class implementation.'''
 
     _name: str  # Internal name storage
-    body: Block  # Body of the downstream module
+    body: list['Expr']  # Body of the downstream module
 
     @property
     def name(self) -> str:
@@ -35,12 +42,12 @@ class Downstream(ModuleBase):
 
         self.body = None
 
-        Singleton.builder.downstreams.append(self)
+        Singleton.peek_builder().downstreams.append(self)
 
     def _repr_impl(self, head):
         Singleton.repr_ident = 2
         var_id = self.as_operand()
-        body = repr(self.body) if self.body is not None else ''
+        body = render_module_body(self.body)
         ext = self._dump_externals()
         return f'''{ext}  #[{head}]
   {var_id} = module {self.name} {{

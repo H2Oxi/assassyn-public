@@ -1,0 +1,413 @@
+---
+title: "理解 Assassyn 中的跨阶段引用：Bind 机制"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    mermaid:
+      theme: default
+      themeVariables:
+        clusterBkg: "#f8fafc"
+        clusterBorder: "#cbd5e1"
+        primaryColor: "#ffffff"
+        primaryTextColor: "#0f172a"
+        lineColor: "#475569"
+
+---
+
+# 教程：理解跨阶段引用 - Bind 机制
+
+> **作者：** Yao Wentao
+> **日期：** 2025.10.24
+>
+
+## 1. 什么是 Bind？
+
+### 1.1 Python 类比
+
+想象你有一个 Python 函数需要多个参数，但这些参数来自不同的地方、不同的时间：
+
+```python
+# 普通的 Python 函数
+def subtract(a, b):
+    return a - b
+
+# 使用 functools.partial 部分绑定参数
+import functools
+partial_sub = functools.partial(subtract, a=10)  # 先绑定 a
+
+# 稍后，当 b 可用时，完成调用
+result = partial_sub(b=3)  # 结果: 10 - 3 = 7
+```
+
+### 1.2 Assassyn 中的 Bind
+
+在 Assassyn 中，**Bind** 实现同样的思想，但用于硬件模块的跨流水线阶段调用：
+
+```python
+# 阶段 1: 部分绑定参数
+bound = module.bind(arg_a=value1)
+
+# 阶段 2: 完成绑定并调用
+AsyncCall(bound.bind(arg_b=value2))
+```
+
+**Bind 解决的问题：** <br>
+- **分流（Diverge）**：一个源向多个目标发送数据 <br>
+- **汇聚（Converge）**：多个源的数据最终汇聚到同一个目标 <br>
+- **时序解耦**：不同阶段的数据在不同时间到达 <br>
+
+---
+
+## 2. 数据分流和汇聚模式
+
+```{mermaid}
+%%| fig-width: 10
+flowchart TD
+  subgraph Driver[驱动阶段]
+    D1[生成数据]
+  end
+
+  subgraph LHS[左路径阶段]
+    L1[处理左侧数据]
+    L2["bind(sub_a=data)"]
+  end
+
+  subgraph RHS[右路径阶段]
+    R1[处理右侧数据]
+    R2["async_called(sub_b=data)"]
+  end
+
+  subgraph Sub[减法器阶段]
+    S1[接收 a 和 b]
+    S2[计算 a - b]
+  end
+
+  D1 -- 数据 --> L1
+  D1 -- 数据 --> R1
+  L1 --> L2
+  R1 --> R2
+  L2 -- "Bind(sub_a)" --> R2
+  R2 -- "完成绑定" --> S1
+  S1 --> S2
+
+  style Driver fill:#e3f2fd
+  style LHS fill:#fff3e0
+  style RHS fill:#ffe0e0
+  style Sub fill:#e8f5e9
+```
+
+**数据流说明：** <br>
+- Driver 分流数据到 LHS 和 RHS 两条路径 <br>
+- LHS 绑定 `sub_a` 参数并返回 Bind 对象 <br>
+- RHS 接收 Bind，添加 `sub_b`，创建完整的AsyncCall <br>
+- Sub 模块从不同阶段汇聚两个参数并执行
+
+---
+
+## 3. 环境设置
+
+```{python}
+#| code-fold: false
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import sys
+import os
+
+assassyn_home = os.path.abspath(os.path.join(os.path.dirname("06_bind_zh.qmd"), '..'))
+os.environ['ASSASSYN_HOME'] = assassyn_home
+lib_path = os.path.join(assassyn_home, 'python')
+sys.path.insert(0, lib_path)
+
+from function_t import run_quietly
+from assassyn.frontend import *
+from assassyn.backend import elaborate
+from assassyn import utils
+import assassyn
+
+print("✅ 环境设置完成")
+```
+
+---
+
+## 4. 完整示例：分流-汇聚系统
+
+### 4.1 定义所有模块
+
+```{python}
+#| code-fold: false
+
+# Subtractor: 接收两个参数并执行减法
+class Subtractor(Module):
+    def __init__(self):
+        super().__init__(ports={'sub_a': Port(Int(32)), 'sub_b': Port(Int(32))})
+
+    @module.combinational
+    def build(self):
+        a, b = self.pop_all_ports(False)
+        c = a - b
+        log("减法器: {} - {} = {}", a, b, c)
+
+# LeftPath: 创建部分 Bind
+class LeftPath(Module):
+    def __init__(self):
+        super().__init__(ports={'lhs_a': Port(Int(32))})
+
+    @module.combinational
+    def build(self, sub: Subtractor):
+        lhs_a = self.pop_all_ports(True)
+        # 只绑定 sub_a，返回部分 Bind
+        return sub.bind(sub_a=lhs_a)
+
+# RightPath: 完成 Bind 并创建 AsyncCall
+class RightPath(Module):
+    def __init__(self):
+        super().__init__(ports={'rhs_b': Port(Int(32))})
+
+    @module.combinational
+    def build(self, bound_sub):
+        rhs_b = self.pop_all_ports(True)
+        # 添加 sub_b 并创建 AsyncCall
+        call = bound_sub.async_called(sub_b=rhs_b)
+        call.bind.set_fifo_depth(sub_a=2, sub_b=2)
+
+# Driver: 数据分流
+class Driver(Module):
+    def __init__(self):
+        super().__init__(ports={})
+
+    @module.combinational
+    def build(self, lhs: LeftPath, rhs: RightPath):
+        cnt = RegArray(Int(32), 1)
+        (cnt & self)[0] <= cnt[0] + Int(32)(1)
+
+        v = cnt[0] * cnt[0]
+        call_lhs = lhs.async_called(lhs_a=v[0:31].bitcast(Int(32)))
+        call_lhs.bind.set_fifo_depth(lhs_a=2)
+
+        call_rhs = rhs.async_called(rhs_b=cnt[0])
+        call_rhs.bind.set_fifo_depth(rhs_b=2)
+
+print("✅ 所有模块已定义")
+```
+
+---
+
+## 5. 构建和仿真
+
+### 5.1 系统构建
+
+```{python}
+#| code-fold: false
+
+print("正在构建系统...")
+
+sys = SysBuilder('bind_demo')
+with sys:
+    # 创建减法器
+    sub = Subtractor()
+    sub.build()
+
+    # 创建左路径并获取部分 Bind
+    lhs = LeftPath()
+    bound_sub = lhs.build(sub)
+
+    # 创建右路径，传递 Bind
+    rhs = RightPath()
+    rhs.build(bound_sub)
+
+    # 创建驱动器
+    driver = Driver()
+    driver.build(lhs, rhs)
+
+print(sys)
+```
+
+### 5.2 运行仿真
+
+```{python}
+#| output-fold: true
+
+# 配置仿真参数
+config = assassyn.backend.config(
+    verilog=utils.has_verilator(),
+    sim_threshold=100,
+    idle_threshold=100,
+    random=False
+)
+
+# 生成仿真器
+def generate_simulator():
+    return elaborate(sys, **config)
+
+(simulator_path, verilator_path), _, _ = run_quietly(generate_simulator)
+print("✅ 仿真器生成完成")
+
+# 运行仿真器
+def run_sim():
+    return utils.run_simulator(simulator_path)
+
+raw, stdout, stderr = run_quietly(run_sim)
+
+if raw is None or not isinstance(raw, str):
+    print("⚠️ 错误：仿真器执行失败")
+    if stderr:
+        print("错误输出：")
+        print(stderr)
+    raise RuntimeError(f"仿真器失败: {stderr}")
+
+print("\n=== 仿真器输出（前 10 个结果）===")
+count = 0
+for line in raw.split('\n'):
+    if '减法器' in line:
+        print(line.strip())
+        count += 1
+        if count >= 10:
+            break
+
+# 验证结果
+def check_output(raw):
+    cnt = 0
+    for line in raw.split('\n'):
+        if '减法器' in line:
+            line_toks = line.split()
+            c = line_toks[-1]
+            a = line_toks[-3]
+            b = line_toks[-5]
+            if int(a) - int(b) == int(c):
+                cnt += 1
+    print(f"\n✅ 验证通过！正确处理了 {cnt} 个减法操作")
+    return cnt
+
+result_count = check_output(raw)
+```
+
+---
+
+## 6. 关键概念总结
+
+### 6.1 Bind vs async_called()
+
+| 特性 | `.bind()` | `.async_called()` |
+|------|-----------|-------------------|
+| **返回值** | `Bind` 对象 | `AsyncCall` 对象 |
+| **执行** | 不执行，只绑定参数 | 触发模块执行 |
+| **完整性** | 可以是部分的 | 必须绑定所有端口 |
+| **用例** | 跨阶段参数传递 | 直接调用 |
+
+**Python 类比：**
+```python
+# async_called() 就像直接调用函数
+result = subtract(a=10, b=3)
+
+# bind() 就像 functools.partial
+partial_sub = functools.partial(subtract, a=10)
+result = partial_sub(b=3)
+```
+
+### 6.2 Bind vs Downstream：时序合流 vs 组合合流
+
+**核心区别：**
+
+| 特性 | **Bind** (时序合流) | **Downstream** (组合合流) |
+|------|-------------------|------------------------|
+| **合流时机** | 跨越多个流水线阶段 | 同一组合逻辑内 |
+| **数据到达** | 不同时间，需 FIFO 缓冲 | 同一时刻，无需缓冲 |
+| **参数绑定** | 渐进式，分阶段绑定 | 一次性，所有参数同时可用 |
+| **典型场景** | 多路径处理后合流 | 多个数据源的组合运算 |
+| **硬件实现** | 需要握手协议和 FIFO | 纯组合逻辑连线 |
+
+**Downstream 示例：组合合流**
+```python
+# 多个数据源在同一阶段合流
+class CombinationalMerge(Module):
+    @module.combinational
+    def build(self):
+        a = source_a.pop()  # 同时刻
+        b = source_b.pop()  # 同时刻
+        c = source_c.pop()  # 同时刻
+        result = compute(a, b, c)  # 组合逻辑
+        self.downstream(result)
+```
+
+**Bind 示例：时序合流**
+```python
+# 多个数据源在不同阶段合流
+class SequentialMerge(Module):
+    @module.combinational
+    def build(self, target: Module):
+        # 阶段 1: 绑定第一个参数
+        bound1 = target.bind(arg_a=value1)
+
+        # 阶段 2: 绑定第二个参数（可能数个周期后）
+        bound2 = bound1.bind(arg_b=value2)
+
+        # 阶段 3: 完成绑定并执行（可能更多周期后）
+        AsyncCall(bound2.bind(arg_c=value3))
+```
+
+**直观理解：**
+```{mermaid}
+%%| fig-width: 10
+flowchart TD
+    subgraph Downstream["Downstream: 组合合流"]
+        D1[源 A] --> D4[组合逻辑]
+        D2[源 B] --> D4
+        D3[源 C] --> D4
+        D4 --> D5[结果]
+        style D4 fill:#e8f5e9
+    end
+
+    subgraph Bind["Bind: 时序合流"]
+        B1[阶段 1: 源 A] --> B4[FIFO A]
+        B2[阶段 2: 源 B] --> B5[FIFO B]
+        B3[阶段 3: 源 C] --> B6[FIFO C]
+        B4 --> B7[握手合并]
+        B5 --> B7
+        B6 --> B7
+        B7 --> B8[结果]
+        style B7 fill:#fff3e0
+    end
+
+    style Downstream fill:#f0f9ff
+    style Bind fill:#fef3f2
+```
+
+**何时使用 Bind？** <br>
+- ✅ 数据来自不同流水线阶段 <br>
+- ✅ 需要跨越多个时钟周期 <br>
+- ✅ 路径长度不同（如分支预测、缓存访问） <br>
+- ✅ 需要解耦不同处理单元的时序 
+
+**何时使用 Downstream？** <br>
+- ✅ 数据在同一阶段内可用 <br>
+- ✅ 纯组合逻辑计算 <br>
+- ✅ 不需要跨周期缓冲 <br>
+- ✅ 所有输入同时到达
+
+### 6.3 常见模式
+
+**模式 1：渐进式绑定** - 跨多个阶段逐步构建参数
+```python
+bound1 = module.bind(param1=value1)      # 阶段 1
+bound2 = bound1.bind(param2=value2)      # 阶段 2
+AsyncCall(bound2.bind(param3=value3))    # 阶段 3: 完成
+```
+
+**模式 2：分流-汇聚** - 数据从一个源分发，然后汇聚到同一目标
+```python
+# 驱动器分流数据
+lhs.async_called(data=value)
+rhs.async_called(data=value)
+# LHS 和 RHS 处理后汇聚到同一个模块
+```
+
+---
+
+## 7. 延伸阅读
+
+- `python/assassyn/ir/expr/call.md` - Bind 和 AsyncCall IR 节点详细说明
+- `docs/design/lang/dsl.md` - DSL 设计，包括数据分流模式
+- `docs/design/arch/arch.md` - 跨阶段组合通信架构

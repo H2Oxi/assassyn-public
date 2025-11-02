@@ -12,7 +12,6 @@ from ....ir.expr import Log
 from ....ir.expr.intrinsic import PureIntrinsic, Intrinsic, ExternalIntrinsic
 from ....ir.const import Const
 from ....ir.dtype import Int
-from ....ir.block import CondBlock, CycledBlock
 from ....utils import unwrap_operand, namify
 
 if TYPE_CHECKING:
@@ -27,15 +26,35 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
     condition_snippets = []
     module_name = namify(dumper.current_module.name)
 
+    final_conditions = []
+    seen_conditions = set()
+
+    def append_condition(cond: Optional[str]):
+        if cond and cond not in seen_conditions:
+            seen_conditions.add(cond)
+            final_conditions.append(cond)
+
     def _sanitize(name: str) -> str:
         if name.startswith("self."):
             name = name[5:]
         return name.replace(".", "_")
 
+    meta_cond = expr.meta_cond
+    if meta_cond is None:
+        raise ValueError("Log.meta_cond is unexpectedly missing")
+
+    if isinstance(meta_cond, Const):
+        if meta_cond.value == 0:
+            append_condition('False')
+    else:
+        exposed_name = _sanitize(dumper.dump_rval(meta_cond, True))
+        valid_signal = f'dut.{module_name}.valid_{exposed_name}.value'
+        expose_signal = f'dut.{module_name}.expose_{exposed_name}.value'
+        append_condition(f'({valid_signal} & {expose_signal})')
+
     for i in expr.operands[1:]:
         operand = unwrap_operand(i)
         if not isinstance(operand, Const):
-            dumper.expose('expr', operand)
             exposed_name = _sanitize(dumper.dump_rval(operand, True))
             valid_signal = f'dut.{module_name}.valid_{exposed_name}.value'
             condition_snippets.append(valid_signal)
@@ -77,27 +96,8 @@ def codegen_log(dumper, expr: Log) -> Optional[str]:
 
     f_string_content = "".join(f_string_content_parts)
 
-    block_condition = dumper.get_pred()
-    block_condition = block_condition.replace('cycle_count', 'dut.global_cycle_count')
-    final_conditions = []
-
-    for cond_str, cond_obj in dumper.cond_stack:
-        if isinstance(cond_obj, CycledBlock):
-            tb_cond_path = \
-            cond_str.replace("self.cycle_count", "dut.global_cycle_count.value")
-            final_conditions.append(tb_cond_path)
-
-        elif isinstance(cond_obj, CondBlock):
-            exposed_name = _sanitize(dumper.dump_rval(cond_obj.cond, True))
-
-            tb_expose_path = f"(dut.{module_name}.expose_{exposed_name}.value)"
-            tb_valid_path = f"(dut.{module_name}.valid_{exposed_name}.value)"
-
-            combined_cond = f"({tb_valid_path} & {tb_expose_path})"
-            final_conditions.append(combined_cond)
-
     if condition_snippets:
-        final_conditions.append(" and ".join(condition_snippets))
+        append_condition(" and ".join(condition_snippets))
 
     if_condition = " and ".join(final_conditions)
 
@@ -130,7 +130,6 @@ def _handle_fifo_intrinsic(dumper, expr, intrinsic, rval):
     fifo = expr.args[0]
     fifo_name = dumper.dump_rval(fifo, False)
     if intrinsic == PureIntrinsic.FIFO_PEEK:
-        dumper.expose('expr', expr)
         return f'{rval} = self.{fifo_name}'
     return f'{rval} = self.{fifo_name}_valid'
 
@@ -141,7 +140,7 @@ def _handle_value_valid(dumper, expr, intrinsic, rval):
         return None
 
     value_expr = expr.operands[0].value
-    if value_expr.parent.module != expr.parent.module:
+    if value_expr.parent != expr.parent:
         port_name = dumper.get_external_port_name(value_expr)
         return f"{rval} = self.{port_name}_valid"
     return f"{rval} = self.executed"
@@ -159,7 +158,7 @@ def _handle_external_output(dumper, expr, intrinsic, rval):
     index_operand = expr.args[2] if len(expr.args) > 2 else None
 
     result = None
-    instance_owner = dumper.external_instance_owners.get(instance)
+    instance_owner = dumper.external_metadata.owner_for(instance)
     if instance_owner and instance_owner != dumper.current_module:
         # Cross-module access: use the exposed port value provided on inputs.
         port_name_for_read = dumper.get_external_port_name(expr)
@@ -208,6 +207,10 @@ def codegen_pure_intrinsic(dumper, expr: PureIntrinsic) -> Optional[str]:
     intrinsic = expr.opcode
     rval = dumper.dump_rval(expr, False)
 
+    # Handle current_cycle directly
+    if intrinsic == PureIntrinsic.CURRENT_CYCLE:
+        return f"{rval} = self.cycle_count"
+
     for handler in (_handle_fifo_intrinsic, _handle_value_valid, _handle_external_output):
         result = handler(dumper, expr, intrinsic, rval)
         if result is not None:
@@ -241,30 +244,29 @@ def codegen_external_intrinsic(dumper, expr: ExternalIntrinsic) -> Optional[str]
 
     call = f"{wrapper_name}({', '.join(connections)})" if connections else f"{wrapper_name}()"
     dumper.external_instance_names[expr] = rval
-    dumper.external_instance_owners[expr] = dumper.current_module
 
-    entries = dumper.external_outputs_by_instance.get(expr, [])
+    entries = dumper.external_metadata.reads_for_instance(expr)
     if entries:
         exposures = dumper.external_output_exposures[dumper.current_module]
         seen_keys = set()
         for entry in entries:
             wire_key = dumper.get_external_wire_key(
                 expr,
-                entry['port_name'],
-                entry['index_operand'],
+                entry.port_name,
+                entry.index_operand,
             )
             if wire_key in seen_keys:
                 continue
             seen_keys.add(wire_key)
-            output_name = f"{rval}_{entry['port_name']}"
+            output_name = f"{rval}_{entry.port_name}"
             dumper.external_wire_outputs[wire_key] = output_name
-            current_pred = dumper.get_pred()
+            current_pred = dumper.get_pred(expr)
             exposures.setdefault(wire_key, {
                 'output_name': output_name,
-                'dtype': entry['expr'].dtype,
+                'dtype': entry.expr.dtype,
                 'instance_name': rval,
-                'port_name': entry['port_name'],
-                'index_operand': entry['index_operand'],
+                'port_name': entry.port_name,
+                'index_operand': entry.index_operand,
                 'index_key': wire_key[2],
                 'condition': current_pred,
             })
@@ -282,18 +284,17 @@ def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
     intrinsic = expr.opcode
 
     if intrinsic == Intrinsic.FINISH:
-        predicate_signal = dumper.get_pred()
-        dumper.finish_conditions.append((predicate_signal, "executed_wire"))
-        # Track that this module has a finish intrinsic for top-level generation
-        dumper.module_metadata[dumper.current_module].has_finish = True
         return None
     if intrinsic == Intrinsic.ASSERT:
-        dumper.expose('expr', expr.args[0])
         return None
     if intrinsic == Intrinsic.WAIT_UNTIL:
         cond = dumper.dump_rval(expr.args[0], False)
         final_cond = cond
         dumper.wait_until = final_cond
+        return None
+    if intrinsic == Intrinsic.PUSH_CONDITION:
+        return None
+    if intrinsic == Intrinsic.POP_CONDITION:
         return None
     if intrinsic == Intrinsic.EXTERNAL_INSTANTIATE:
         # Should be handled by ExternalIntrinsic check above

@@ -33,22 +33,22 @@ The IR node class for array write operations, representing `arr[idx] = val`.
 
 #### Methods
 
-#### `__init__(self, arr, idx: Value, val: Value, module: ModuleBase = None)`
+#### `__init__(self, arr, idx: Value, val: Value, module: ModuleBase = None, meta_cond=None)`
 
 ```python
-def __init__(self, arr, idx: Value, val: Value, module: ModuleBase = None):
-    super().__init__(ArrayWrite.ARRAY_WRITE, [arr, idx, val])
+def __init__(self, arr, idx: Value, val: Value, module: ModuleBase = None, meta_cond=None):
     # Get module from Singleton if not provided
     if module is None:
         # pylint: disable=import-outside-toplevel
         from ...builder import Singleton
-        module = Singleton.builder.current_module
+        module = Singleton.peek_builder().current_module
+    super().__init__(ArrayWrite.ARRAY_WRITE, [arr, idx, val], meta_cond=meta_cond)
     self.module = module
 ```
 
-**Explanation:** Initializes an array write operation with the target array, index, value, and module context. If no module is provided, it retrieves the current module from the builder singleton. This module context is crucial for [multi-port write support](../../../docs/design/pipeline.md) where multiple modules may write to the same array.
+**Explanation:** Initializes an array write operation with the target array, index, value, predicate, and module context. If no module is provided, it retrieves the current module from the builder singleton via `Singleton.peek_builder()`. Predicate metadata is captured by the base `Expr` constructor, which snapshots the active predicate stack (or uses the explicitly supplied `meta_cond`) so downstream consumers can reuse the same guards without recomputing condition stacks. This module and predicate context is crucial for [multi-port write support](../../../docs/design/pipeline.md) where multiple modules may write to the same array while remaining gated by guard conditions.
 
-**Note on Builder Context Dependency:** The `ArrayWrite` class depends on the global `Singleton.builder.current_module` when no module is explicitly provided. This creates an implicit dependency on the builder context that should be considered when using this class outside of normal builder contexts.
+**Note on Builder Context Dependency:** The `ArrayWrite` class depends on `Singleton.peek_builder()` when no module is explicitly provided. Callers must ensure a builder is active or supply the module explicitly to avoid runtime errors.
 
 **Error Conditions:**
 - `AssertionError`: Raised if `arr` is not an `Array` instance or `idx` is not a `Value` instance during `ArrayRead` initialization
@@ -105,13 +105,19 @@ def dtype(self):
 ```python
 def __repr__(self):
     module_info = f' /* {self.module.name} */' if self.module else ''
+    meta = self.meta_cond
+    if meta is None:
+        meta_info = ''
+    else:
+        operand = meta.as_operand() if hasattr(meta, 'as_operand') else repr(meta)
+        meta_info = f' // meta cond {operand}'
     return (
         f'{self.array.as_operand()}[{self.idx.as_operand()}]'
-        f' <= {self.val.as_operand()}{module_info}'
+        f' <= {self.val.as_operand()}{module_info}{meta_info}'
     )
 ```
 
-**Explanation:** Returns a human-readable string representation of the array write operation in the format `array[index] <= value /* module_name */`, including the module context for debugging purposes.
+**Explanation:** Returns a human-readable string representation of the array write operation in the format `array[index] <= value /* module_name */ // meta cond`, including the module context and captured predicate metadata for debugging purposes.
 
 ### class ArrayRead
 
@@ -201,7 +207,7 @@ def __le__(self, value):
     assert isinstance(value, (Value, RecordValue)), \
         f"Value must be Value or RecordValue, got {type(value)}"
 
-    current_module = Singleton.builder.current_module
+    current_module = Singleton.peek_builder().current_module
 
     write_port = self.array & current_module
     return write_port._create_write(self.idx.value, value)

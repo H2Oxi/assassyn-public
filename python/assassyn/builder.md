@@ -8,7 +8,7 @@ This module provides the core infrastructure for building intermediate represent
 
 The builder module is the core of assassyn's IR construction system. It provides:
 
-1. **Context Management**: `SysBuilder` manages the hierarchical context of modules and blocks during IR construction
+1. **Context Management**: `SysBuilder` manages the active module context during IR construction
 2. **Automatic IR Injection**: The `@ir_builder` decorator automatically injects IR nodes into the AST and tracks their source locations
 3. **Source Name Inference**: Automatically derives meaningful variable names from Python source code using AST analysis
 4. **Global State Management**: `Singleton` metaclass maintains global builder state and configuration
@@ -20,7 +20,7 @@ The builder module is the core of assassyn's IR construction system. It provides
 ```python
 # Functions
 def process_naming(expr, line_of_code: str, lineno: int) -> Dict[str, Any]
-def ir_builder(func=None, *, node_type=None) -> Callable
+def ir_builder(func=None) -> Callable
 
 # Classes
 class SysBuilder:
@@ -29,16 +29,16 @@ class SysBuilder:
     def __exit__(self, exc_type, exc_value, traceback) -> None
 
     @property
-    def current_module(self) -> Module | None
+    def current_module(self) -> Module
     @property
-    def current_block(self) -> Block | None
+    def current_body(self) -> list
     @property
     def insert_point(self) -> list
     @property
     def exposed_nodes(self) -> dict
 
-    def enter_context_of(self, ty: str, entry) -> None
-    def exit_context_of(self, ty: str) -> None
+    def enter_context_of(self, module) -> None
+    def exit_context_of(self) -> None
     def has_driver(self) -> bool
     def has_module(self, name: str) -> Module | None
     def expose_on_top(self, node, kind=None) -> None
@@ -58,27 +58,27 @@ class Singleton(type):
 
 ## SysBuilder Class
 
-`SysBuilder` is a context manager that serves as both the system and the IR builder. It maintains the state of IR construction, including active modules, blocks, arrays, and exposed nodes.
+`SysBuilder` is a context manager that serves as both the system and the IR builder. It maintains the state of IR construction, including active modules, module bodies, arrays, and exposed nodes.
 
 **Key Attributes:**
 - `name`: System name
 - `modules`: List of all modules in the system
 - `downstreams`: List of downstream modules
 - `arrays`: List of array objects
-- `_ctx_stack`: Dictionary tracking module and block context stacks (keys: `'module'`, `'block'`)
+- `_module_stack`: Stack tracking active module contexts
 - `_exposes`: Dictionary mapping nodes to their exposure kinds
 - `line_expression_tracker`: Tracks expressions on each source line for naming
 - `naming_manager`: Instance of `NamingManager` for variable name generation
 
 **Properties:**
-- `current_module`: Returns the module at the top of the module context stack, or `None` if empty
-- `current_block`: Returns the block at the top of the block context stack, or `None` if empty
-- `insert_point`: Returns `current_block.body`, the list where new IR nodes are inserted
+- `current_module`: Returns the module at the top of the module context stack; raises `RuntimeError` if no module is active
+- `current_body`: Returns `current_module.body`
+- `insert_point`: Alias for `current_body`, the list where new IR nodes are inserted
 - `exposed_nodes`: Returns the dictionary of exposed nodes
 
 **Context Methods:**
-- `enter_context_of(ty, entry)`: Pushes a new context onto the stack for type `ty` (either `'module'` or `'block'`). For `CondBlock` entries, it adds the condition to the module's externals.
-- `exit_context_of(ty)`: Pops the top context from the stack for type `ty`
+- `enter_context_of(module)`: Pushes a new module context onto the stack after wrapping it in a ModuleContext.
+- `exit_context_of()`: Pops the top module context after verifying predicate balance and returns it.
 
 **Query Methods:**
 - `has_driver()`: Returns `True` if any module has class name `'Driver'`
@@ -88,7 +88,7 @@ class Singleton(type):
 - `expose_on_top(node, kind=None)`: Marks a node for exposure in the top-level function with an optional kind label
 
 **Context Manager Protocol:**
-When entering (`__enter__`), it sets itself as `Singleton.builder` and initializes the global naming tracker. When exiting (`__exit__`), it clears the singleton references. This ensures only one builder is active at a time.
+When entering (`__enter__`), it registers itself via `Singleton.set_builder(self)` and initialises the global naming tracker. When exiting (`__exit__`), it verifies the active builder matches and then clears it with `Singleton.set_builder(None)`. This ensures only one builder is active at a time.
 
 **String Representation:**
 `__repr__` generates a textual representation showing all arrays, modules, and downstreams in a structured format.
@@ -97,13 +97,15 @@ When entering (`__enter__`), it sets itself as `Singleton.builder` and initializ
 
 ## Singleton Metaclass
 
-`Singleton` maintains global state for the IR builder system using class attributes:
+`Singleton` maintains global state for the IR builder system using class attributes and helper methods:
 
-- `builder`: The currently active `SysBuilder` instance (or `None`)
+- `_builder`: Internal slot storing the active `SysBuilder` instance
 - `repr_ident`: Indentation level for string representations
 - `id_slice`: Slice used for generating object identifiers (default `slice(-6, -1)`), referenced by `utils.identifierize()`
 - `with_py_loc`: Boolean flag controlling whether Python source locations are included in representations
 - `all_dirs_to_exclude`: List of directory paths to exclude during stack inspection (site-packages, etc.)
+- `set_builder(builder: Optional[SysBuilder])`: Registers or clears the active builder, raising if a different builder is already present
+- `peek_builder() -> SysBuilder`: Returns the active builder, raising if none is registered
 
 **`initialize_dirs_to_exclude()`**: Lazily initializes `all_dirs_to_exclude` with Python's site-packages directories (from `site.getsitepackages()` and `site.getusersitepackages()`). This prevents the builder from attributing source locations to library code.
 
@@ -111,21 +113,19 @@ When entering (`__enter__`), it sets itself as `Singleton.builder` and initializ
 
 ## IR Builder Decorator
 
-**`ir_builder(func=None, *, node_type=None)`** is a decorator that wraps functions to automatically inject their return values into the IR. It provides two key features:
+**`ir_builder(func=None)`** is a decorator that wraps functions to automatically inject their return values into the IR. It provides two key features:
 
-1. **Automatic IR Node Injection**: Non-`Const` return values are appended to `insert_point` (the current block's body)
+1. **Automatic IR Node Injection**: Non-`Const` return values are appended to `insert_point` (the current body list)
 2. **Source Location Tracking**: Uses stack inspection to determine the Python source location where the IR node was created
 
 **Decorator Behavior (`_apply_ir_builder`):**
 
 For each IR node returned by the decorated function:
 - If the result is `None` or a `Const`, no special handling occurs
-- For `Expr` nodes, sets `parent` to `current_block` and adds operands to the module's externals
-- Inserts the node into `insert_point` (current block's body)
+- For `Expr` nodes, sets `parent` to the active module (via `current_module`) and adds operands to the module's externals
+- Inserts the node into `insert_point` (current body list)
 - Inspects the call stack to find the first frame outside the assassyn package and excluded directories, recording that location as `node.loc`
 - For valued expressions with code context, calls `process_naming()` to infer a source name from the assignment statement
-
-**Optional `node_type` Parameter**: If provided, attaches `_ir_builder_node_type` attribute to the decorated function, useful for metadata tracking.
 
 ---
 

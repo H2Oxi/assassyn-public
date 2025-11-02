@@ -3,55 +3,58 @@
 This module contains functions to generate Verilog code for array and FIFO operations.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, TYPE_CHECKING
 
 from ....ir.expr import ArrayRead, ArrayWrite, FIFOPop, FIFOPush
 from ....ir.memory.sram import SRAM
 from ....utils import namify
+from ....utils.enforce_type import enforce_type
+
+if TYPE_CHECKING:
+    from ..design import CIRCTDumper
 
 
-def codegen_array_read(dumper, expr: ArrayRead) -> Optional[str]:
+@enforce_type
+def codegen_array_read(dumper: CIRCTDumper, expr: ArrayRead) -> Optional[str]:
     """Generate code for array read operations."""
     array_ref = expr.array
     is_sram_payload = False
 
     if isinstance(dumper.current_module, SRAM):
-        if array_ref == dumper.current_module._payload:  # pylint: disable=protected-access
+        if array_ref.is_payload(dumper.current_module):
             is_sram_payload = True
 
     rval = dumper.dump_rval(expr, False)
 
     if is_sram_payload:
         body = f'{rval} = self.mem_dataout'
-        dumper.expose('array', expr)
     else:
         array_name = dumper.dump_rval(array_ref, False)
-        port_idx = dumper.array_read_expr_port.get(expr)
+        port_idx = dumper.array_metadata.read_port_index_for_expr(expr)
         if port_idx is None:
             return None
         body = f'{rval} = self.{array_name}_rdata_port{port_idx}'
-        dumper.expose('array', expr)
 
     return body
 
 
-def codegen_array_write(dumper, expr: ArrayWrite) -> Optional[str]:
+@enforce_type
+def codegen_array_write(_dumper: CIRCTDumper, _expr: ArrayWrite) -> Optional[str]:
     """Generate code for array write operations."""
-    dumper.expose('array', expr)
+    return None
 
-
-def codegen_fifo_push(dumper, expr: FIFOPush) -> Optional[str]:
+@enforce_type
+def codegen_fifo_push(_dumper: CIRCTDumper, _expr: FIFOPush) -> Optional[str]:
     """Generate code for FIFO push operations."""
-    dumper.expose('fifo', expr)
-    # Track pushes in module metadata to avoid redundant expression walking
-    dumper.module_metadata[dumper.current_module].pushes.append(expr)
+    # FIFO interactions are recorded during the analysis pre-pass.
+    return None
 
 
-def codegen_fifo_pop(dumper, expr: FIFOPop) -> Optional[str]:
+@enforce_type
+def codegen_fifo_pop(dumper: CIRCTDumper, expr: FIFOPop) -> Optional[str]:
     """Generate code for FIFO pop operations."""
     rval = namify(expr.as_operand())
     fifo_name = dumper.dump_rval(expr.fifo, False)
-    dumper.expose('fifo_pop', expr)
-    # Track pops in module metadata to avoid redundant expression walking
-    dumper.module_metadata[dumper.current_module].pops.append(expr)
     return f'{rval} = self.{fifo_name}'

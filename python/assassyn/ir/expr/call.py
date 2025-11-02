@@ -19,8 +19,8 @@ class FIFOPush(Expr):
 
     FIFO_PUSH  = 302
 
-    def __init__(self, fifo, val):
-        super().__init__(FIFOPush.FIFO_PUSH, [fifo, val])
+    def __init__(self, fifo, val, meta_cond=None):
+        super().__init__(FIFOPush.FIFO_PUSH, [fifo, val], meta_cond=meta_cond)
         self.bind = None
         self.fifo_depth = None
 
@@ -43,7 +43,16 @@ class FIFOPush(Expr):
 
     def __repr__(self):
         handle = self.as_operand()
-        return f'{self.fifo.as_operand()}.push({self.val.as_operand()}) // handle = {handle}'
+        meta = self.meta_cond
+        if meta is None:
+            meta_repr = ''
+        else:
+            operand = meta.as_operand() if hasattr(meta, 'as_operand') else repr(meta)
+            meta_repr = f' // meta cond {operand}'
+        return (
+            f'{self.fifo.as_operand()}.push({self.val.as_operand()})'
+            f' // handle = {handle}{meta_repr}'
+        )
 
 class Bind(Expr):
     '''The class for binding operations. Function bind is a functional programming concept like
@@ -159,8 +168,8 @@ class AsyncCall(Expr):
     # Call operations
     ASYNC_CALL = 500
 
-    def __init__(self, bind: Bind):
-        super().__init__(AsyncCall.ASYNC_CALL, [bind])
+    def __init__(self, bind: Bind, meta_cond=None):
+        super().__init__(AsyncCall.ASYNC_CALL, [bind], meta_cond=meta_cond)
         bind.callee.users.append(self)
 
     @property
@@ -177,4 +186,8 @@ class AsyncCall(Expr):
 
     def __repr__(self):
         bind = self.bind.as_operand()
-        return f'async_call {bind}'
+        meta = self.meta_cond
+        if meta is None:
+            return f'async_call {bind}'
+        operand = meta.as_operand() if hasattr(meta, 'as_operand') else repr(meta)
+        return f'async_call {bind} // meta cond {operand}'

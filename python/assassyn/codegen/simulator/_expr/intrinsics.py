@@ -97,6 +97,10 @@ _PURE_INTRINSIC_DISPATCH = {
 def codegen_pure_intrinsic(node: PureIntrinsic, module_ctx):
     """Generate code for pure intrinsic operations."""
     intrinsic = node.opcode
+    if intrinsic == PureIntrinsic.CURRENT_CYCLE:
+        # current_cycle returns cycle count in u64; stamp is usize time in half-cycles (50).
+        # Divide by 100 to get cycles and cast to u64.
+        return "((sim.stamp as u64) / 100u64)"
     codegen_func = _PURE_INTRINSIC_DISPATCH.get(intrinsic)
     if codegen_func is not None:
         return codegen_func(node, module_ctx)
@@ -217,6 +221,7 @@ _INTRINSIC_DISPATCH = {
     Intrinsic.SEND_READ_REQUEST: _codegen_send_read_request,
     Intrinsic.SEND_WRITE_REQUEST: _codegen_send_write_request,
     Intrinsic.EXTERNAL_INSTANTIATE: _codegen_external_instantiate,
+    # PUSH/POP_CONDITION do not emit inline expressions here; handled at modules visitor
 }
 
 

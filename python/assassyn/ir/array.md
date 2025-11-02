@@ -16,6 +16,23 @@ The module also provides the `Slice` class for bit-slicing operations, which is 
 
 The `array.py` module provides the `RegArray` function and `Array` class methods for creating and manipulating register arrays.
 
+### Ownership Metadata
+
+Each array records its provenance via the `owner` attribute. The owner is one of:
+
+- `None` when the array is instantiated outside any module.
+- A `ModuleBase` instance for module-scoped arrays.
+- A `MemoryBase` instance (for example, `SRAM` or `DRAM`) for memory-managed
+  buffers.
+
+Downstream passes should use `Array.is_payload(memory_cls_or_instance)` to detect
+memory payload buffers. The helper consolidates the identity logic that used to
+be implemented ad hoc (`array.owner is memory and array is memory._payload`),
+while auxiliary registers such as the SRAM `dout` latch continue to look like
+regular arrays even though they reference the same owner. See
+[`docs/design/internal/array-ownership.md`](../../../docs/design/internal/array-ownership.md)
+for the detailed rationale.
+
 ### `RegArray`
 
 ```python
@@ -25,6 +42,8 @@ def RegArray(
     initializer: list = None,
     name: str = None,
     attr: list = None,
+    *,
+    owner: ModuleBase | MemoryBase | None = None,
 ) -> Array:
     '''
     The frontend API to declare a register array.
@@ -34,6 +53,7 @@ def RegArray(
     @param initializer The initializer of the register array. If not set, it is 0-initialized.
     @param name The custom name for the array.
     @param attr The attribute list of the array.
+    @param owner Optional ownership override; defaults to the current module (or None outside a module).
     @return Array instance registered with the AST builder.
     '''
 ```
@@ -58,7 +78,13 @@ my_array = RegArray(UInt(32), 16, name="register_file")  # 16-element array of 3
 counter = RegArray(Int(32), 1, initializer=[0])  # Single-element counter initialized to 0
 
 # Array with attributes (commonly used in memory modules)
-payload = RegArray(Bits(64), 1024, attr=[self], name=f'{self.name}_val')
+payload = RegArray(
+    Bits(64),
+    1024,
+    attr=[self],
+    name=f'{self.name}_val',
+    owner=self,  # assign memory instance as owner
+)
 ```
 
 ## Internal Helpers
@@ -68,8 +94,8 @@ payload = RegArray(Bits(64), 1024, attr=[self], name=f'{self.name}_val')
 ```python
 class Array:
     '''
-    The class represents a register array in the AST IR.
-    '''
+The class represents a register array in the AST IR.
+'''
     scalar_ty: DType  # Data type of each element in the array
     size: int  # Size of the array
     initializer: list  # Initial values for the array elements
@@ -77,6 +103,7 @@ class Array:
     _users: typing.List[Expr]  # Users of the array
     _name: str  # Internal name storage
     _write_ports: typing.Dict['ModuleBase', 'WritePort']  # Write ports for this array
+    _owner: 'ModuleBase | MemoryBase | None'  # Provenance descriptor
 ```
 
 #### `as_operand`
@@ -244,13 +271,19 @@ def __getitem__(self, index: typing.Union[int, Value]) -> ArrayRead:
 
 **Explanation:**
 
-This method implements array read operations with caching to avoid duplicate reads within the same block. It uses the builder's `array_read_cache` to store and retrieve previously created `ArrayRead` expressions, improving IR efficiency.
+This method implements array read operations with predicate-aware caching to avoid duplicate reads within active predicate scopes. The caching mechanism is integrated with the predicate frame stack to ensure correct invalidation when predicates are popped.
+
+The method probes predicate frame caches from top (most nested) to bottom, allowing outer-scope reads to be reused within inner predicates while preventing inner-scope reads from leaking out after their predicate expires. If a cached read is found in any active predicate frame, it is returned immediately. Otherwise, a new `ArrayRead` is created and stored in the top-most active predicate frame's cache.
 
 The method automatically converts integer indices to `UInt` values using [to_uint](../dtype.md#to_uint) and creates `ArrayRead` expressions that represent the read operation in the IR.
 
-The caching mechanism is block-scoped, meaning that reads within the same block are deduplicated, but reads across different blocks are treated as separate operations. This is important for hardware semantics, as different blocks may represent different clock cycles or conditional execution paths.
+The cache key is a tuple of `(array, index)`, ensuring that different indices into the same array are treated as separate operations, while the same index access within a predicate scope is deduplicated. This predicate-aware caching is essential for FSM and other conditional execution patterns where array reads must not leak across conditional boundaries.
 
-The cache key is a tuple of `(array, index)`, ensuring that different indices into the same array are treated as separate operations, while the same index access within a block is reused.
+**Cache Protocol:**
+- Cache probing: Walks the predicate frame stack from top to bottom
+- Cache insertion: New reads are stored in the top-most active predicate frame
+- Cache invalidation: Automatically handled when predicates are popped
+- Cache scope: Per-predicate frame, ensuring no leakage across conditional boundaries
 
 #### `get_flattened_size`
 
@@ -418,4 +451,52 @@ def __repr__(self):
 
     @return Formatted string showing the slice operation.
     '''
+```
+#### `owner` Property and `assign_owner`
+
+```python
+@property
+def owner(self) -> ModuleBase | MemoryBase | None:
+    '''
+    Return the ownership context for this array.
+
+    @return ModuleBase, MemoryBase, or None describing provenance.
+    '''
+
+def assign_owner(self, owner: ModuleBase | MemoryBase | None) -> None:
+    '''
+    Override the ownership context.
+
+    @param owner Ownership reference to apply. Intended for controlled refactors.
+    '''
+
+def is_payload(self, memory: type['MemoryBase'] | 'MemoryBase') -> bool:
+    '''
+    Return whether this array is the payload buffer of the provided memory.
+
+    @param memory Memory class (SRAM/DRAM) or instance to test against.
+    @return True when self.owner matches the memory type and the array is the memory payload.
+    '''
+```
+
+**Explanation:**
+
+`owner` exposes the provenance metadata described in the ownership model
+documentation, and `assign_owner` provides the sanctioned hook for controlled
+refactors that need to re-home an array while keeping type validation in place.
+The `is_payload` helper is the canonical way to detect memory payload buffers:
+it accepts either a memory class (`SRAM`, `DRAM`) or an instance of those
+classes. Internally the argument is normalised into a `(memory_cls,
+memory_instance)` pair so that type validation, owner comparison, and payload
+identity checks flow through the same code path. Supplying any other type
+raises the same `TypeError` regardless of whether the caller passed a class or
+an instance, keeping misuse obvious while avoiding duplicated logic.
+
+**Example:**
+
+```python
+sram = SRAM(width=64, depth=1024, init_file=None)
+assert sram._payload.is_payload(SRAM)
+assert sram._payload.is_payload(sram)
+assert not sram.dout.is_payload(SRAM)
 ```

@@ -6,11 +6,12 @@ import os
 from ...analysis import topo_downstream_modules, get_upstreams
 from .utils import dtype_to_rust_type, int_imm_dumper_impl, fifo_name
 from ...builder import SysBuilder
-from ...ir.block import CycledBlock
+# from ...ir.block import CycledBlock  # legacy; kept for backward-compatible IRs
 from ...ir.expr import Bind
 from ...ir.module import Downstream, Module
 from ...ir.module.external import ExternalSV
 from ...ir.memory.sram import SRAM
+from ...ir.memory.base import MemoryBase
 from .external import (
     collect_external_classes,
     collect_external_intrinsics,
@@ -127,6 +128,9 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         fd.write(f"pub {dram_name}_response: Response,\n")
     # Add array fields to simulator struct
     for array in sys.arrays:
+        owner = array.owner
+        if isinstance(owner, MemoryBase) and array.is_payload(owner) and owner in dram_modules:
+            continue
         name = namify(array.name)
         dtype = dtype_to_rust_type(array.scalar_ty)
         num_ports = port_manager.get_port_count(name)
@@ -396,21 +400,12 @@ def dump_simulator( #pylint: disable=too-many-locals, too-many-branches, too-man
         fd.write(f"""
         for i in 1..={sim_threshold} {{ sim.Driver_event.push_back(i * 100); }} """)
 
-    # Add initial events for testbench if present
+    # Add initial events for testbench if present: schedule every cycle
     testbench = sys.has_module("Testbench")
     if testbench is not None:
-        cycles = []
-
-        # Collect cycles from testbench blocks
-        for block in testbench.body.body:
-            if isinstance(block, CycledBlock):
-                cycles.append(block.cycle)
-
-        if cycles:
-            fd.write(f"""
-              let tb_cycles = vec![{', '.join(map(str, cycles))}];
-              for cycle in tb_cycles {{
-                sim.Testbench_event.push_back(cycle * 100);
+        fd.write(f"""
+              for i in 1..={sim_threshold} {{
+                sim.Testbench_event.push_back(i * 100);
               }}
             """)
 
