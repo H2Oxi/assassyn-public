@@ -13,15 +13,14 @@ def run_test(name: str, top: callable, checker: callable, **kwargs):
     Lightweight test utility for assassyn systems.
 
     Args:
-        name: System name (must be unique across testcases)
+        name: Base system name (unique suffix added per invocation)
         top: Callable that builds the system (receives no args or sys, uses sys context)
         checker: Callable that validates simulator output (receives raw string)
         **config: Additional config passed to elaborate()
             (e.g., sim_threshold, idle_threshold, random)
     """
     # Generate unique system name to avoid conflicts in parallel test execution
-    unique_name = f"{name}"
-    sys = SysBuilder(unique_name)
+    sys = SysBuilder(name)
     with sys:
         # Check if top() accepts a parameter
         sig = inspect.signature(top)
@@ -33,6 +32,8 @@ def run_test(name: str, top: callable, checker: callable, **kwargs):
     # Set defaults, allow overrides
     if 'verilog' not in kwargs:
         kwargs['verilog'] = utils.has_verilator()
+    if 'enable_cache' not in kwargs:
+        kwargs['enable_cache'] = False
     cfg = config()
     cfg.update(kwargs)
 
@@ -51,14 +52,13 @@ def dump_ir(name: str, builder: callable, checker: callable, print_dump: bool = 
     Lightweight IR dump test utility.
 
     Args:
-        name: System name (must be unique across testcases)
+        name: Base system name (unique suffix added per invocation)
         builder: Callable that builds IR nodes (receives sys as argument)
         checker: Callable that validates IR dump string (receives repr(sys))
         print_dump: Whether to print IR dump to stdout (default True)
     """
     # Generate unique system name to avoid conflicts in parallel test execution
-    unique_name = f"{name}"
-    sys = SysBuilder(unique_name)
+    sys = SysBuilder(name)
     with sys:
         builder(sys)
 

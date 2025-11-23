@@ -52,17 +52,17 @@ class TypeOrientedNamer:
     @staticmethod
     def _sanitize(text: str) -> str:
         """Sanitize text into a valid identifier-like token."""
-        return re.sub(r'[^0-9a-zA-Z_]+', '_', text).strip('_') or 'val'
+        return re.sub(r'[^0-9a-zA-Z_]+', '_', text) or 'val'
 
     @staticmethod
     def _symbol_to_name():
         """Convert operator symbols to descriptive names."""
         return {
             '+': 'add', '-': 'sub', '*': 'mul', '/': 'div', '%': 'mod',
-            '&': 'and', '|': 'or', '^': 'xor',
+            '&': 'and_', '|': 'or_', '^': 'xor_',
             '<': 'lt', '>': 'gt', '<=': 'le', '>=': 'ge', '==': 'eq', '!=': 'neq',
             '<<': 'shl', '>>': 'shr',
-            '!': 'not',
+            '!': 'not_',
         }
 
 
@@ -129,7 +129,8 @@ class TypeOrientedNamer:
             op_name = self._symbol_to_name().get(symbol, 'bin')
             lhs_desc = self._describe_operand(node.lhs)
             rhs_desc = self._describe_operand(node.rhs)
-            return self._combine_parts(lhs_desc, op_name, rhs_desc) or op_name
+            res = self._combine_parts(lhs_desc, op_name, rhs_desc) or op_name
+            return res
         return 'bin'
 
     def _unary_op_strategy(self, node: Any) -> str:

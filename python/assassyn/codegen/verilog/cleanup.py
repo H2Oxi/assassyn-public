@@ -99,7 +99,7 @@ def _format_reduction_expr(
     predicates: Sequence[str],
     *,
     default_literal: Optional[str],
-    op: str = "or_",
+    op: str = "operator.or_",
 ) -> str:
     """Format a reduction expression with configurable operator and default literal."""
 
@@ -172,7 +172,7 @@ def cleanup_post_generation(dumper):
         executed_expr = _format_reduction_expr(
             exec_conditions,
             default_literal="Bits(1)(1)",
-            op="and_",
+            op="operator.and_",
         )
         dumper.append_code(f"executed_wire = {executed_expr}")
 
@@ -299,12 +299,18 @@ def cleanup_post_generation(dumper):
         dumper.append_code(f'# Expose: {expr}')
         dumper.append_code(f'self.expose_{render.exposed_name} = {render.rval}')
         predicate_terms = [
-            f'({dumper.format_predicate(getattr(entry, "meta_cond", None))})'
+            f'({formatted})'
             for entry in grouped_exposures
+            if (predicate := getattr(entry, "meta_cond", None)) is not None
+            if (formatted := dumper.format_predicate(predicate)) != "Bits(1)(1)"
         ]
-        pred_condition = _format_reduction_expr(
-            predicate_terms,
-            default_literal="Bits(1)(1)",
+        pred_condition = (
+            _format_reduction_expr(
+                predicate_terms,
+                default_literal="Bits(1)(0)",
+            )
+            if predicate_terms
+            else "Bits(1)(1)"
         )
         dumper.append_code(
             f'self.valid_{render.exposed_name} = executed_wire & ({pred_condition})'
@@ -322,7 +328,7 @@ def cleanup_post_generation(dumper):
             continue
         dumper.append_code(f'# Summing triggers for {rval}')
         add_terms = [f"Mux({pred}, UInt(8)(0), UInt(8)(1))" for pred in trigger_predicates]
-        sum_expression = f"reduce(add, [{', '.join(add_terms)}])"
+        sum_expression = f"reduce(operator.add, [{', '.join(add_terms)}])"
         resized_sum = f"(({sum_expression}).as_bits()[0:8].as_uint())"
         final_trigger_value = f"Mux(executed_wire, UInt(8)(0), {resized_sum})"
         dumper.append_code(f'self.{rval}_trigger = {final_trigger_value}')
