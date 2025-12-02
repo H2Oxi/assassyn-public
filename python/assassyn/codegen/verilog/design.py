@@ -4,7 +4,7 @@
 # pylint: disable=no-member
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, Union, Optional
+from typing import List, Dict, Tuple, Union, Optional, Iterable
 from collections import defaultdict
 from pathlib import Path
 
@@ -38,7 +38,7 @@ from .array import ArrayMetadataRegistry
 class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-many-statements
     """Dumps IR to CIRCT-compatible Verilog code."""
 
-    wait_until: bool
+    wait_conditions: List[str]
     indent: int
     code: List[str]
     logs: List[str]
@@ -46,6 +46,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
     sys: SysBuilder
     is_top_generation: bool
     memory_defs: set
+    expr_wait_conditions: Dict[Expr, List[str]]
 
     def __init__(
         self,
@@ -55,7 +56,8 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         external_metadata: ExternalRegistry | None = None,
     ):
         super().__init__()
-        self.wait_until = None
+        self.wait_conditions = []
+        self.expr_wait_conditions = {}
         self.indent = 0
         self.code = []
         self.logs = []
@@ -64,8 +66,10 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
         self.is_top_generation = False
         self.array_metadata = ArrayMetadataRegistry()
         self.memory_defs = set()
+        self.default_fifo_depth: int = 1
         self.expr_to_name = {}
         self.name_counters = defaultdict(int)
+        self.expr_wait_conditions: Dict[Expr, List[str]] = {}
         # Track external module wiring during emission
         self.external_wire_assignments = []
         self.external_wire_assignment_keys = set()
@@ -85,14 +89,36 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
     def get_pred(self, expr: Expr) -> str:
         """Format the predicate guarding *expr* (or return the default literal)."""
-        return self.format_predicate(expr.meta_cond)
+        wait_terms = self.expr_wait_conditions.get(expr, ())
+        return self.format_predicate(expr.meta_cond, extra_conditions=wait_terms)
 
-    def format_predicate(self, predicate: Optional[Expr]) -> str:
+    def format_predicate(
+        self,
+        predicate: Optional[Expr],
+        *,
+        extra_conditions: Optional[Iterable[str]] = None,
+        raw: bool = False,
+    ) -> str:
         """Format a predicate value as a Bits expression."""
         if predicate is None:
-            return "Bits(1)(1)"
-        predicate_code = self.dump_rval(predicate, False)
-        return ensure_bits(predicate_code)
+            predicate_code = "Bits(1)(1)"
+        else:
+            predicate_code = self.dump_rval(predicate, False)
+            if not raw:
+                predicate_code = ensure_bits(predicate_code)
+
+        combined_terms: List[str] = []
+        if extra_conditions is not None:
+            combined_terms.extend(extra_conditions)
+        else:
+            combined_terms.extend(self.wait_conditions)
+
+        if combined_terms:
+            wait_terms = [ensure_bits(cond) for cond in combined_terms]
+            wait_expr = " & ".join(wait_terms)
+            predicate_code = f"({predicate_code} & ({wait_expr}))"
+
+        return predicate_code
 
     def async_callers(self, module: Module) -> Tuple[Module, ...]:
         """Return the async caller modules recorded for *module*."""
@@ -158,6 +184,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
     # pylint: disable=arguments-renamed
     def visit_expr(self, expr: Expr):
+        self.expr_wait_conditions[expr] = list(self.wait_conditions)
         self.append_code(f'# {expr}')
 
         # Add location comment if available
@@ -186,7 +213,7 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
                 f"FIFO metadata missing for module {node.name}; run collect_fifo_metadata "
                 "and pass the results to CIRCTDumper."
             )
-        self.wait_until = None
+        self.wait_conditions = []
         self.current_module = node
         # For downstream modules, we still need to process the body
         if node.body is not None:
@@ -341,18 +368,23 @@ class CIRCTDumper(Visitor):  # pylint: disable=too-many-instance-attributes,too-
 
 
 @enforce_type
-def generate_design(fname: Union[str, Path], sys: SysBuilder) -> None:
+def generate_design(
+    fname: Union[str, Path],
+    sys: SysBuilder,
+    *,
+    default_fifo_depth: int = 1,
+) -> None:
     """Generate a complete Verilog design file for the system."""
     with open(str(fname), 'w', encoding='utf-8') as fd:
         fd.write(HEADER)
 
         module_metadata, interactions = collect_fifo_metadata(sys)
-        external_metadata = collect_external_metadata(sys)
         dumper = CIRCTDumper(
             module_metadata=module_metadata,
             interactions=interactions,
-            external_metadata=external_metadata,
+            external_metadata=collect_external_metadata(sys),
         )
+        dumper.default_fifo_depth = default_fifo_depth
 
         # Generate sramBlackbox module definitions for each SRAM
         sram_modules = [m for m in sys.downstreams if isinstance(m, SRAM)]

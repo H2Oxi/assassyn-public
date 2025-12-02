@@ -140,7 +140,7 @@ During the cleanup pass the dumper feeds the precomputed metadata into `_emit_pr
 
 **`visit_block`**: Visits conditional and cycled blocks, relying on the IR-level `meta_cond` metadata captured during construction to keep predicates aligned across code generation, metadata collection, and log emission.
 
-**`get_pred(expr)`**: Formats the predicate metadata attached to `expr`. The dumper consumes the final carry exposed via `expr.meta_cond`, and expressions that lack `meta_cond` now trigger an explicit error so refactors cannot silently drop predicate capture.
+**`get_pred(expr)`**: Formats the predicate metadata attached to `expr`. The dumper combines `expr.meta_cond` with the wait predicates that were active when the expression was visited (recorded in `expr_wait_conditions`), so only statements located after a `wait_until` see the additional gating. Expressions without a predicate still contribute the per-wait guard, while pre-wait expressions evaluate with the default `Bits(1)(1)` carry.
 
 **`get_external_port_name`**: Creates mangled port names for external values to avoid naming conflicts
 

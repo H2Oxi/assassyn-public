@@ -82,6 +82,44 @@ def generate_top_harness(dumper: CIRCTDumper):
         )
     dumper.append_code('self.global_cycle_count = cycle_count')
 
+    # Precompute FIFO depths and per-module trigger widths
+    module_fifo_depths = {}
+    all_modules = dumper.sys.modules + dumper.sys.downstreams
+    default_fifo_depth = getattr(dumper, "default_fifo_depth", 2)
+    for mod in all_modules:
+        module_fifo_depths[mod] = \
+            {port: default_fifo_depth for port in getattr(mod, 'ports', [])}
+
+    # Use metadata-driven pushes to compute FIFO depths, avoiding expression walking
+    for module in dumper.sys.modules + dumper.sys.downstreams:
+        metadata = dumper.module_metadata.get(module)
+        if metadata is None:
+            continue
+        for push in metadata.interactions.pushes:
+            fifo_port = push.fifo
+            owner = fifo_port.module
+            if owner not in module_fifo_depths:
+                continue
+            depth = push.fifo_depth
+            if not isinstance(depth, int) or depth <= 0:
+                depth = default_fifo_depth
+            current = module_fifo_depths[owner].get(fifo_port, default_fifo_depth)
+            module_fifo_depths[owner][fifo_port] = max(current, depth)
+
+    module_trigger_widths = {}
+    for module in dumper.sys.modules:
+        depth_map = module_fifo_depths.get(module, {})
+        if not depth_map:
+            width = default_fifo_depth
+        else:
+            depths = list(depth_map.values())
+            width = depths[0]
+            if any(d != width for d in depths):
+                raise RuntimeError(
+                    f"Inconsistent FIFO depths for module {module.name}: {depths}"
+                )
+        module_trigger_widths[module] = width
+
     # --- 1. Wire Declarations (Generic) ---
     dumper.append_code('# --- Wires for FIFOs, Triggers, and Arrays ---')
     for module in dumper.sys.modules:
@@ -99,7 +137,8 @@ def generate_top_harness(dumper: CIRCTDumper):
     for module in dumper.sys.modules:
         tc_base_name = f'{namify(module.name)}_trigger_counter'
         dumper.append_code(f'# Wires for {module.name}\'s TriggerCounter')
-        dumper.append_code(f'{tc_base_name}_delta = Wire(Bits(8))')
+        width = module_trigger_widths.get(module, default_fifo_depth)
+        dumper.append_code(f'{tc_base_name}_delta = Wire(Bits({width}))')
         dumper.append_code(f'{tc_base_name}_delta_ready = Wire(Bits(1))')
         dumper.append_code(f'{tc_base_name}_pop_valid = Wire(Bits(1))')
         dumper.append_code(f'{tc_base_name}_pop_ready = Wire(Bits(1))')
@@ -172,29 +211,6 @@ def generate_top_harness(dumper: CIRCTDumper):
     # --- 2. Hardware Instantiations (Generic) ---
     dumper.append_code('\n# --- Hardware Instantiations ---')
 
-    module_fifo_depths = {}
-    all_modules = dumper.sys.modules + dumper.sys.downstreams
-    default_fifo_depth = 2
-    for mod in all_modules:
-        module_fifo_depths[mod] = \
-            {port: default_fifo_depth for port in getattr(mod, 'ports', [])}
-
-    # Use metadata-driven pushes to compute FIFO depths, avoiding expression walking
-    for module in dumper.sys.modules + dumper.sys.downstreams:
-        metadata = dumper.module_metadata.get(module)
-        if metadata is None:
-            continue
-        for push in metadata.interactions.pushes:
-            fifo_port = push.fifo
-            owner = fifo_port.module
-            if owner not in module_fifo_depths:
-                continue
-            depth = push.fifo_depth
-            if not isinstance(depth, int) or depth <= 0:
-                depth = default_fifo_depth
-            current = module_fifo_depths[owner].get(fifo_port, default_fifo_depth)
-            module_fifo_depths[owner][fifo_port] = max(current, depth)
-
     for module in dumper.sys.modules:
         depth_map = module_fifo_depths.get(module, {})
         for port in module.ports:
@@ -219,8 +235,9 @@ def generate_top_harness(dumper: CIRCTDumper):
     # Instantiate TriggerCounters
     for module in dumper.sys.modules:
         tc_base_name = f'{namify(module.name)}_trigger_counter'
+        width = module_trigger_widths.get(module, default_fifo_depth)
         dumper.append_code(
-            f'{tc_base_name}_inst = TriggerCounter(WIDTH=8)'
+            f'{tc_base_name}_inst = TriggerCounter(WIDTH={width})'
             f'(clk=self.clk, rst_n=~self.rst, '
             f'delta={tc_base_name}_delta, pop_ready={tc_base_name}_pop_ready)'
         )
@@ -510,6 +527,7 @@ def generate_top_harness(dumper: CIRCTDumper):
     dumper.append_code('\n# --- Trigger Counter Delta Connections ---')
     for module in dumper.sys.modules:
         mod_name = namify(module.name)
+        width = module_trigger_widths.get(module, default_fifo_depth)
         async_callers = dumper.async_callers(module)
         if async_callers:
             trigger_terms = [
@@ -519,10 +537,13 @@ def generate_top_harness(dumper: CIRCTDumper):
             summed_triggers = f"reduce(operator.add, [{', '.join(trigger_terms)}])"
 
             dumper.append_code(
-                f"{mod_name}_trigger_counter_delta.assign({summed_triggers}.as_bits(8))"
+                f"{mod_name}_trigger_counter_delta.assign("
+                f"{summed_triggers}.as_bits()[0:{width}])"
                 )
         else:
-            dumper.append_code(f"{mod_name}_trigger_counter_delta.assign(Bits(8)(1))")
+            dumper.append_code(
+                f"{mod_name}_trigger_counter_delta.assign(Bits({width})(1))"
+            )
 
     dumper.indent -= 8
     dumper.append_code('')

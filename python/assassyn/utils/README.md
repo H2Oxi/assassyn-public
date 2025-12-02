@@ -86,15 +86,17 @@ It's used by the builder system to determine package-specific paths for stack in
 def patch_fifo(file_path: str) -> None
 ```
 
-Replaces all occurrences of 'fifo_n #(' with 'fifo #(' in the Top.sv.
+Replaces all occurrences of 'fifo_n #(' with 'fifo #(' and
+'trigger_counter_n #(' with 'trigger_counter #(' in the Top.sv.
 
 **Parameters:**
 - `file_path`: Path to the Verilog file to patch
 
 **Explanation:**
-This function patches Verilog files by normalizing FIFO instantiations. It uses regex pattern `r'fifo_\d+\s*#\s*\('`
-to find numbered FIFO instantiations and replaces them with the standard `fifo #(` format. This is used in the
-Verilator workflow to ensure consistent FIFO naming in generated Verilog code.
+This function patches Verilog files by normalizing FIFO and trigger counter instantiations. It uses regex patterns
+`r'fifo_\d+\s*#\s*\('` and `r'trigger_counter_\d+\s*#\s*\('` to find numbered instantiations and replaces them with
+the standard `fifo #(` and `trigger_counter #(` formats. This is used in the Verilator workflow to ensure consistent
+naming in generated Verilog code.
 
 ### build_simulator
 
@@ -201,7 +203,7 @@ The helper function to run the verilator.
 This function runs the complete Verilator simulation workflow:
 1. Changes to the specified directory
 2. Executes `design.py` to generate Verilog code
-3. Applies `patch_fifo()` to `sv/hw/Top.sv` to normalize FIFO instantiations
+3. Applies `patch_fifo()` to `sv/hw/Top.sv` to normalize FIFO and trigger counter instantiations
 4. Executes `tb.py` for the testbench
 5. Restores the original working directory
 

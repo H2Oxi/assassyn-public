@@ -69,19 +69,31 @@ def _cmd_wrapper(cmd):
 
 def patch_fifo(file_path):
     """
-    Replaces all occurrences of 'fifo_n #(' with 'fifo #(' in the Top.sv
+    Normalize FIFO and trigger_counter instantiations in a Verilog Top.sv.
+
+    Replaces all occurrences of 'fifo_n #(' with 'fifo #(' and
+    'trigger_counter_n #(' with 'trigger_counter #('.
     """
     if not os.path.isfile(file_path):
         return
 
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
-    pattern = re.compile(r'fifo_\d+\s*#\s*\(')
-    replacement = 'fifo #('
-    new_content, num_replacements = pattern.subn(replacement, content)
-    if num_replacements > 0:
+
+    patterns = [
+        (re.compile(r'fifo_\d+\s*#\s*\('), 'fifo #('),
+        (re.compile(r'trigger_counter_\d+\s*#\s*\('), 'trigger_counter #('),
+    ]
+
+    modified = False
+    for pattern, replacement in patterns:
+        content, num_replacements = pattern.subn(replacement, content)
+        if num_replacements > 0:
+            modified = True
+
+    if modified:
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
+            f.write(content)
 
 
 def get_simulator_binary_path(manifest_path):

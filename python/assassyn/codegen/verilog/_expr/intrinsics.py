@@ -289,8 +289,7 @@ def codegen_intrinsic(dumper, expr: Intrinsic) -> Optional[str]:
         return None
     if intrinsic == Intrinsic.WAIT_UNTIL:
         cond = dumper.dump_rval(expr.args[0], False)
-        final_cond = cond
-        dumper.wait_until = final_cond
+        dumper.wait_conditions.append(cond)
         return None
     if intrinsic == Intrinsic.PUSH_CONDITION:
         return None

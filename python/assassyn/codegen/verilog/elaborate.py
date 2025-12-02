@@ -175,7 +175,11 @@ def elaborate(sys: SysBuilder, **kwargs) -> str:
     external_sources = _collect_external_sources(sys)
     external_file_names = sorted({Path(file_name).name for file_name in external_sources})
 
-    logs = generate_design(path / "design.py", sys)
+    logs = generate_design(
+        path / "design.py",
+        sys,
+        default_fifo_depth=kwargs.get('fifo_depth', 2),
+    )
 
     files_to_copy = ["fifo.sv", "trigger_counter.sv"]
     top_sv_path = path / "sv" / "hw" / "Top.sv"

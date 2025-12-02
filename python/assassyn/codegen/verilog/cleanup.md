@@ -26,7 +26,7 @@ This is the main cleanup function that generates all the necessary control signa
 
 1. **Execution Signal Generation**: Creates the `executed_wire` signal that determines when a module should execute:
    - For downstream modules: Gathers upstream dependencies with `analysis.get_upstreams(module)` and ORs their `executed` flags via `_format_reduction_expr(..., op="operator.or_", default_literal="Bits(1)(0)")`.
-   - For regular modules: ANDs the trigger-counter pop-valid input with any active `wait_until` predicate recorded during expression lowering using the same helper with `op="operator.and_"` and a `Bits(1)(1)` default.
+   - For regular modules: Uses only the trigger-counter pop-valid input. Note that `wait_until` predicates are NOT included here because they should only block operations that appear AFTER the `wait_until` in the IR sequence, not ALL operations in the module. Operations before `wait_until` must execute unconditionally to allow proper state progression.
 
 2. **Finish Signal Generation**: Reduces every FINISH site captured in
    `module_metadata.finish_sites`, formatting each intrinsic’s `expr.meta_cond` and gating it with
@@ -46,7 +46,7 @@ This is the main cleanup function that generates all the necessary control signa
    - Produces the module-local `*_pop_ready` backpressure signal without consulting dumper internals.
    - Reuses `_emit_predicate_mux_chain` so the push-valid reduction and push-data mux mirror the prioritisation used for array writes.
 
-6. **Module Trigger Signal Generation**: Reads async trigger exposures from `dumper.interactions.async_ledger.calls_for_module(current_module)`, sums all predicates (each taken from the call’s `meta_cond` and converted to an 8-bit increment), and routes the result into `<callee>_trigger`.
+6. **Module Trigger Signal Generation**: Reads async trigger exposures from `dumper.interactions.async_ledger.calls_for_module(current_module)`, sums all predicates (each taken from the call’s `meta_cond` and converted to an 8-bit increment), and routes the result into `<callee>_trigger` (currently represented as an 8‑bit unsigned value; the top‑level harness narrows this to the trigger counter width derived from FIFO depth).
 
 7. **External Exposure Generation**: For every value exposure in `module_metadata.value_exposures`:
    - Schedules `expose_<name>`/`valid_<name>` port declarations for the module generator.

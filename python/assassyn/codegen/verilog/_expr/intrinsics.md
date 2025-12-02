@@ -102,9 +102,9 @@ This function generates Verilog code for block intrinsic operations, which are c
    - Used for formal verification and simulation debugging
 
 3. **WAIT_UNTIL**: Implements the credit-based pipeline wait mechanism
-   - Sets `dumper.wait_until` to the condition expression
+   - Pushes the condition expression onto `dumper.wait_conditions`, preserving the sequence of waits encountered while visiting the module body
    - Used to control module execution timing in the credit-based architecture
-   - The cleanup phase incorporates this into the execution signal
+   - The cleanup phase incorporates these stored predicates into post-wait assignments and triggers via `get_pred`
 
 4. **EXTERNAL_INSTANTIATE / ExternalIntrinsic**: Creates and wires external modules in-line
    - `ExternalIntrinsic` instances are handled before the opcode switch, generating calls to `<wrapper>::new()` and wiring all inputs

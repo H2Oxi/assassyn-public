@@ -10,7 +10,6 @@ from typing import Optional
 
 from ....ir.expr import BinaryOp, UnaryOp, Concat, Cast, Select, Select1Hot
 from ....ir.array import Slice
-from ....ir.dtype import Bits
 from ..utils import dump_type_cast, ensure_bits
 
 
@@ -62,6 +61,14 @@ def codegen_binary_op(dumper, expr: BinaryOp) -> Optional[str]:
             f".{dump_type_cast(dtype)}"
         )
 
+    # Bitwise operations: normalize both operands to Bits.
+    if binop in (BinaryOp.BITWISE_AND, BinaryOp.BITWISE_OR, BinaryOp.BITWISE_XOR):
+        op_str = BinaryOp.OPERATORS[binop]
+        a_bits = ensure_bits(a)
+        b_bits = ensure_bits(b)
+        op_body = f"(({a_bits} {op_str} {b_bits}).{dump_type_cast(dtype)})"
+        return f"{rval} = {op_body}"
+
     if expr.is_comparative():
         # Convert to uint for comparison
         if not expr.lhs.dtype.is_int():
@@ -76,9 +83,6 @@ def codegen_binary_op(dumper, expr: BinaryOp) -> Optional[str]:
     op_str = BinaryOp.OPERATORS[expr.opcode]
     if expr.lhs.dtype != expr.rhs.dtype:
         b = f"{b}.{dump_type_cast(expr.lhs.dtype)}"
-    if op_str == "&":
-        if expr.rhs.dtype != Bits:
-            b = f"{b}.as_bits()"
     op_body = f"(({a} {op_str} {b}).{dump_type_cast(dtype)})"
     return f'{rval} = {op_body}'
 

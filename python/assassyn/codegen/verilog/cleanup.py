@@ -28,6 +28,16 @@ class ValueExposureRender(NamedTuple):
     rval: str
 
 
+def _expr_wait_conditions(dumper, expr):
+    """Return the wait_until predicates active when *expr* was emitted."""
+    if expr is None:
+        return ()
+    table = getattr(dumper, 'expr_wait_conditions', None)
+    if not table:
+        return ()
+    return tuple(table.get(expr, ()))
+
+
 def resolve_value_exposure_render(dumper, expr: Expr) -> ValueExposureRender:
     """Compute the rendered name, dtype, and rval for a value exposure."""
 
@@ -59,7 +69,10 @@ def generate_sram_control_signals(dumper, sram_info, module_view):
     if writes:
         first_write = writes[0]
         write_addr = dumper.dump_rval(first_write.idx, False)
-        write_pred_literal = dumper.format_predicate(getattr(first_write, "meta_cond", None))
+        write_pred_literal = dumper.format_predicate(
+            getattr(first_write, "meta_cond", None),
+            extra_conditions=_expr_wait_conditions(dumper, first_write),
+        )
         write_enable = f'executed_wire & ({write_pred_literal})'
         write_data = dumper.dump_rval(first_write.val, False)
     else:
@@ -150,6 +163,7 @@ def _emit_predicate_mux_chain(
 def cleanup_post_generation(dumper):
     """generating signals for connecting modules"""
     dumper.append_code('')
+    completion_guard = "Bits(1)(1)"
 
     if isinstance(dumper.current_module, Downstream):
         node = dumper.current_module
@@ -165,9 +179,10 @@ def cleanup_post_generation(dumper):
         )
         dumper.append_code(f"executed_wire = {executed_expr}")
     else:
+        # Note: wait_until should NOT gate executed_wire because it should only
+        # block operations that come AFTER it in the IR sequence, not ALL operations.
+        # Operations before wait_until should still execute.
         exec_conditions = ["self.trigger_counter_pop_valid"]
-        if dumper.wait_until:
-            exec_conditions.append(f"({dumper.wait_until})")
 
         executed_expr = _format_reduction_expr(
             exec_conditions,
@@ -175,13 +190,17 @@ def cleanup_post_generation(dumper):
             op="operator.and_",
         )
         dumper.append_code(f"executed_wire = {executed_expr}")
+        completion_guard = dumper.format_predicate(None)
 
     module_metadata = dumper.module_metadata[dumper.current_module]
     module_view = module_metadata.interactions
 
     finish_terms = []
     for finish_site in module_metadata.finish_sites:
-        predicate = dumper.format_predicate(getattr(finish_site, "meta_cond", None))
+        predicate = dumper.format_predicate(
+            getattr(finish_site, "meta_cond", None),
+            extra_conditions=_expr_wait_conditions(dumper, finish_site),
+        )
         finish_terms.append(f"({predicate} & executed_wire)")
     finish_expr = _format_reduction_expr(
         finish_terms,
@@ -216,7 +235,10 @@ def cleanup_post_generation(dumper):
                 port_suffix = f"_port{port_idx}"
 
                 def render_array_predicate(write: 'ArrayWrite') -> str:
-                    return dumper.format_predicate(getattr(write, "meta_cond", None))
+                    return dumper.format_predicate(
+                        getattr(write, "meta_cond", None),
+                        extra_conditions=_expr_wait_conditions(dumper, write),
+                    )
 
                 def render_array_value(
                     write: 'ArrayWrite',
@@ -298,12 +320,18 @@ def cleanup_post_generation(dumper):
         render = resolve_value_exposure_render(dumper, expr)
         dumper.append_code(f'# Expose: {expr}')
         dumper.append_code(f'self.expose_{render.exposed_name} = {render.rval}')
-        predicate_terms = [
-            f'({formatted})'
-            for entry in grouped_exposures
-            if (predicate := getattr(entry, "meta_cond", None)) is not None
-            if (formatted := dumper.format_predicate(predicate)) != "Bits(1)(1)"
-        ]
+        predicate_terms = []
+        for entry in grouped_exposures:
+            predicate = getattr(entry, "meta_cond", None)
+            if predicate is None:
+                continue
+            formatted = dumper.format_predicate(
+                predicate,
+                extra_conditions=_expr_wait_conditions(dumper, entry),
+            )
+            if formatted == "Bits(1)(1)":
+                continue
+            predicate_terms.append(f'({formatted})')
         pred_condition = (
             _format_reduction_expr(
                 predicate_terms,
@@ -320,7 +348,10 @@ def cleanup_post_generation(dumper):
     for callee, trigger_entries in async_groups.items():
         rval = dumper.dump_rval(callee, False)
         trigger_predicates = [
-            dumper.format_predicate(getattr(call, "meta_cond", None))
+            dumper.format_predicate(
+                getattr(call, "meta_cond", None),
+                extra_conditions=_expr_wait_conditions(dumper, call),
+            )
             for call in trigger_entries
         ]
         if not trigger_predicates:
@@ -343,7 +374,11 @@ def cleanup_post_generation(dumper):
             fifo_default = f"{dump_type(fifo_port.dtype)}(0)"
 
             def render_fifo_predicate(entry) -> str:
-                return dumper.dump_rval(getattr(entry, "meta_cond", None), False)
+                return dumper.format_predicate(
+                    getattr(entry, "meta_cond", None),
+                    extra_conditions=_expr_wait_conditions(dumper, entry),
+                    raw=True,
+                )
 
             def render_fifo_value(entry) -> str:
                 return dumper.dump_rval(entry.val, False)
@@ -373,10 +408,14 @@ def cleanup_post_generation(dumper):
             dumper.append_code(f"{fifo_prefix}_push_data = {fifo_data_expr}")
 
         if local_pops:
-            pop_predicates = [
-                f'({dumper.dump_rval(getattr(entry, "meta_cond", None), False)})'
-                for entry in local_pops
-            ]
+            pop_predicates = []
+            for entry in local_pops:
+                predicate = dumper.format_predicate(
+                    getattr(entry, "meta_cond", None),
+                    extra_conditions=_expr_wait_conditions(dumper, entry),
+                    raw=True,
+                )
+                pop_predicates.append(f'({predicate})')
             final_pop_condition = _format_reduction_expr(
                 pop_predicates,
                 default_literal="Bits(1)(0)",
@@ -404,4 +443,4 @@ def cleanup_post_generation(dumper):
         condition = data.get('condition', 'Bits(1)(1)')
         dumper.append_code(f'self.valid_{output_name} = executed_wire & ({condition})')
 
-    dumper.append_code('self.executed = executed_wire')
+    dumper.append_code(f'self.executed = executed_wire & ({completion_guard})')
