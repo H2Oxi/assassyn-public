@@ -18,7 +18,8 @@ class FSM:# pylint: disable=R0903
 
         self.transition_table = transition_table
 
-        self.state_bits = math.floor(math.log2(len(transition_table)))
+        num_states = max(1, len(transition_table))
+        self.state_bits = max(1, math.ceil(math.log2(num_states)))
         print(f"State bits: {self.state_bits}")
 
 

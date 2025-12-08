@@ -9,6 +9,18 @@ from assassyn.frontend import SysBuilder
 from assassyn.backend import elaborate, config
 from assassyn import utils
 
+from .stimulus import StimulusBinding, StimulusDriver, StimulusSignal, StimulusTimeline
+from .checker import (
+    LogChecker,
+    LogRecord,
+    PrefixExtractor,
+    RegexExtractor,
+    KeyValueParser,
+    RegexParser,
+    ReferenceHook,
+    expect_increasing,
+)
+
 def run_test(name: str, top: callable, checker: callable, **kwargs):
     """
     Lightweight test utility for assassyn systems.
@@ -71,3 +83,21 @@ def dump_ir(name: str, builder: callable, checker: callable, print_dump: bool = 
         print(sys_repr)
 
     checker(sys_repr)
+
+
+__all__ = [
+    "run_test",
+    "dump_ir",
+    "StimulusBinding",
+    "StimulusDriver",
+    "StimulusSignal",
+    "StimulusTimeline",
+    "LogChecker",
+    "LogRecord",
+    "PrefixExtractor",
+    "RegexExtractor",
+    "KeyValueParser",
+    "RegexParser",
+    "ReferenceHook",
+    "expect_increasing",
+]
