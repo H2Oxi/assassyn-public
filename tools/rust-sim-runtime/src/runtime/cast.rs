@@ -350,7 +350,7 @@ impl ValueCastTo<u64> for BigInt {
     }
     match sign {
       num_bigint::Sign::Plus => data[0],
-      num_bigint::Sign::Minus => (!data[0] + 1) & u64::MAX,
+      num_bigint::Sign::Minus => !data[0] + 1,
       num_bigint::Sign::NoSign => data[0],
     }
   }
